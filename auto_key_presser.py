@@ -12,7 +12,10 @@ from pynput import keyboard
 from pynput.keyboard import Key, KeyCode, Controller
 
 # ── Config path ──────────────────────────────────────────────────────────────
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "config.json")
+if getattr(sys, 'frozen', False):
+    CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "config.json")
+else:
+    CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 # ── Theme colors ─────────────────────────────────────────────────────────────
 COLOR_BG_MAIN        = "#0A0A0A"
@@ -148,23 +151,14 @@ def normalize_hotkey(key_value) -> str | None:
 
 
 def _vk_to_numpad_name(vk: int) -> str | None:
-    """Convert a virtual key code to a numpad name string, or None."""
-    if 96 <= vk <= 105:
-        return f"NUMPAD_{vk - 96}"
-    return {
-        106: "NUMPAD_MULTIPLY",
-        107: "NUMPAD_ADD",
-        108: "NUMPAD_SEPARATOR",
-        109: "NUMPAD_SUBTRACT",
-        110: "NUMPAD_DECIMAL",
-        111: "NUMPAD_DIVIDE",
-    }.get(vk)
+    """Convert a virtual key code to an uppercase numpad name string, or None."""
+    name = NUMPAD_VK_TO_NAME.get(vk)
+    return name.upper() if name else None
 
 
 def _vk_to_numpad_name_lower(vk: int) -> str | None:
     """Convert a virtual key code to a lowercase numpad name string, or None."""
-    result = _vk_to_numpad_name(vk)
-    return result.lower() if result else None
+    return NUMPAD_VK_TO_NAME.get(vk)
 
 
 # ── Config I/O ────────────────────────────────────────────────────────────────
@@ -202,7 +196,7 @@ class App(tk.Tk):
         self.random_thread:     threading.Thread | None = None
         self.individual_threads = None
         self.hotkey_listener:   keyboard.Listener | None = None
-        self.held_keys:         set = set()
+        self.held_keys:         dict = {}
 
         self.is_capturing_presser_hotkey = False
         self.is_capturing_random_hotkey  = False
@@ -975,14 +969,34 @@ class App(tk.Tk):
     def _on_random_min_change(self, value):
         if self.is_random_running:
             return
-        self.config_data.get("random_move", {})["min_sec"] = value
+        try:
+            val = int(value)
+        except ValueError:
+            return
+        max_val = self.config_data.get("random_move", {}).get("max_sec", 20)
+        if val > max_val:
+            val = max_val
+            if hasattr(self, 'min_spinbox'):
+                self.min_spinbox.delete(0, "end")
+                self.min_spinbox.insert(0, str(val))
+        self.config_data.get("random_move", {})["min_sec"] = val
         self.has_unsaved_changes = True
         self._update_action_button_state()
 
     def _on_random_max_change(self, value):
         if self.is_random_running:
             return
-        self.config_data.get("random_move", {})["max_sec"] = value
+        try:
+            val = int(value)
+        except ValueError:
+            return
+        min_val = self.config_data.get("random_move", {}).get("min_sec", 5)
+        if val < min_val:
+            val = min_val
+            if hasattr(self, 'max_spinbox'):
+                self.max_spinbox.delete(0, "end")
+                self.max_spinbox.insert(0, str(val))
+        self.config_data.get("random_move", {})["max_sec"] = val
         self.has_unsaved_changes = True
         self._update_action_button_state()
 
@@ -1100,6 +1114,9 @@ class App(tk.Tk):
         status_text  = "IDLE" if not self.is_random_running else "RUNNING - RANDOM MOVE ACTIVE"
         status_color = COLOR_TEXT_MUTED if not self.is_random_running else COLOR_SUCCESS
         self.status_label.config(text=status_text, fg=status_color)
+        for t in self.press_threads:
+            if t.is_alive():
+                t.join(timeout=0.2)
         self.press_threads.clear()
         self._enable_settings_controls()
 
@@ -1119,9 +1136,15 @@ class App(tk.Tk):
         self._disable_settings_controls()
 
         random_cfg = self.config_data.get("random_move", {})
+        min_sec = random_cfg.get("min_sec", 5)
+        max_sec = random_cfg.get("max_sec", 20)
+        # Safe clamp min/max
+        if min_sec > max_sec:
+            min_sec, max_sec = max_sec, min_sec
+
         thread = threading.Thread(
             target=self._random_move_loop,
-            args=(random_cfg.get("min_sec", 5), random_cfg.get("max_sec", 20), random_cfg.get("delay_ms", 100)),
+            args=(min_sec, max_sec, random_cfg.get("delay_ms", 100)),
             daemon=True,
         )
         thread.start()
@@ -1135,6 +1158,8 @@ class App(tk.Tk):
         status_text  = "IDLE" if not self.is_presser_running else "RUNNING - AUTO PRESSER ACTIVE"
         status_color = COLOR_TEXT_MUTED if not self.is_presser_running else COLOR_SUCCESS
         self.status_label.config(text=status_text, fg=status_color)
+        if self.random_thread and self.random_thread.is_alive():
+            self.random_thread.join(timeout=0.2)
         self.random_thread = None
         self._enable_settings_controls()
 
@@ -1148,9 +1173,12 @@ class App(tk.Tk):
             for key in resolved_keys:
                 if not self.is_presser_running:
                     break
-                keyboard_controller.press(key)
-                time.sleep(0.02)
-                keyboard_controller.release(key)
+                try:
+                    keyboard_controller.press(key)
+                    time.sleep(0.02)
+                    keyboard_controller.release(key)
+                except Exception as e:
+                    print(f"Error pressing key {key}: {e}")
                 time.sleep(delay_s)
             self.is_presser_running = False
             self.after(0, self._stop_presser)
@@ -1159,9 +1187,12 @@ class App(tk.Tk):
                 for key in resolved_keys:
                     if not self.is_presser_running:
                         break
-                    keyboard_controller.press(key)
-                    time.sleep(0.02)
-                    keyboard_controller.release(key)
+                    try:
+                        keyboard_controller.press(key)
+                        time.sleep(0.02)
+                        keyboard_controller.release(key)
+                    except Exception as e:
+                        print(f"Error pressing key {key}: {e}")
                     time.sleep(delay_s)
                 if self.is_presser_running and use_every:
                     time.sleep(repeat_interval_s)
@@ -1181,8 +1212,11 @@ class App(tk.Tk):
 
             # Repeat-tap every 50ms until hold_duration elapsed
             while self.is_random_running and (time.time() - start_time) < hold_duration:
-                keyboard_controller.press(key)
-                keyboard_controller.release(key)
+                try:
+                    keyboard_controller.press(key)
+                    keyboard_controller.release(key)
+                except Exception as e:
+                    print(f"Error in random move pressing {key}: {e}")
                 time.sleep(TAP_INTERVAL_S)
 
             # Pause before next direction
@@ -1196,6 +1230,13 @@ class App(tk.Tk):
 
     def _start_hotkey_listener(self):
         def on_key_press(key):
+            # Check for Escape to cancel key capturing
+            if key == Key.esc and (self.is_capturing_presser_hotkey or 
+                                   self.is_capturing_random_hotkey or 
+                                   self.is_capturing_add_key):
+                self.after(0, self._cancel_all_captures)
+                return
+
             if self.is_capturing_presser_hotkey:
                 self._apply_presser_hotkey(key)
                 return
@@ -1206,6 +1247,10 @@ class App(tk.Tk):
                 self._apply_add_key(key)
                 return
 
+            # Clean up old held keys (older than 1.5 seconds)
+            now = time.time()
+            self.held_keys = {k: t for k, t in self.held_keys.items() if now - t < 1.5}
+
             # Presser hotkey
             presser_hotkey = self.config_data.get("start_stop_key", "numpad_decimal")
             matched = normalize_hotkey(key) == normalize_hotkey(presser_hotkey)
@@ -1215,7 +1260,7 @@ class App(tk.Tk):
                     hasattr(key, 'name') and key.name and key.name.lower() == presser_hotkey.lower()
                 )
             if matched and key not in self.held_keys:
-                self.held_keys.add(key)
+                self.held_keys[key] = now
                 self.after(0, self._toggle_presser)
                 return
 
@@ -1228,11 +1273,11 @@ class App(tk.Tk):
                     hasattr(key, 'name') and key.name and key.name.lower() == random_hotkey.lower()
                 )
             if matched and key not in self.held_keys:
-                self.held_keys.add(key)
+                self.held_keys[key] = now
                 self.after(0, self._toggle_random)
 
         def on_key_release(key):
-            self.held_keys.discard(key)
+            self.held_keys.pop(key, None)
 
         self.hotkey_listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
         self.hotkey_listener.daemon = True
@@ -1240,8 +1285,32 @@ class App(tk.Tk):
 
     def _restart_hotkey_listener(self):
         if self.hotkey_listener:
-            self.hotkey_listener.stop()
+            try:
+                self.hotkey_listener.stop()
+                self.hotkey_listener.join(timeout=0.5)
+            except Exception as e:
+                print(f"Error stopping hotkey listener: {e}")
         self._start_hotkey_listener()
+
+    def _cancel_all_captures(self):
+        self.is_capturing_presser_hotkey = False
+        self.is_capturing_random_hotkey = False
+        self.is_capturing_add_key = False
+
+        if hasattr(self, 'presser_hotkey_display_btn'):
+            self.presser_hotkey_display_btn.config(
+                text=self.config_data.get("start_stop_key", "numpad_decimal"),
+                bg=COLOR_BG_INPUT, fg=COLOR_HOVER
+            )
+        if hasattr(self, 'random_hotkey_display_btn'):
+            self.random_hotkey_display_btn.config(
+                text=self.config_data.get("random_start_stop_key", "numpad_multiply"),
+                bg=COLOR_BG_INPUT, fg=COLOR_HOVER
+            )
+        if hasattr(self, 'add_key_btn'):
+            self.add_key_btn.config(text="PRESS KEY TO ADD", bg=COLOR_BG_INPUT, fg=COLOR_HOVER)
+
+        self.status_label.config(text="IDLE", fg=COLOR_TEXT_MUTED)
 
     # ── Window events ─────────────────────────────────────────────────────────
 
