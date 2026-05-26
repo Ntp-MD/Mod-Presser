@@ -11,28 +11,34 @@ from tkinter import messagebox
 from pynput import keyboard
 from pynput.keyboard import Key, KeyCode, Controller
 
+# ── Config path ──────────────────────────────────────────────────────────────
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "config.json")
 
-BG_MAIN      = "#0A0A0A"
-BG_CARD      = "#141414"
-BG_INPUT     = "#1F1F1F"
-COLOR_BORDER = "#2A2A2A"
-COLOR_ACCENT = "#888888"
-COLOR_HOVER  = "#00C853"
-COLOR_SUCCESS = "#00C853"
-COLOR_DANGER  = "#FF3D00"
-COLOR_TEXT   = "#FFFFFF"
-COLOR_TEXT_MUTED = "#888888"
+# ── Theme colors ─────────────────────────────────────────────────────────────
+COLOR_BG_MAIN        = "#0A0A0A"
+COLOR_BG_CARD        = "#141414"
+COLOR_BG_INPUT       = "#1F1F1F"
+COLOR_BORDER         = "#2A2A2A"
+COLOR_ACCENT         = "#888888"
+COLOR_HOVER          = "#00C853"
+COLOR_SUCCESS        = "#00C853"
+COLOR_DANGER         = "#FF3D00"
+COLOR_TEXT           = "#FFFFFF"
+COLOR_TEXT_MUTED     = "#888888"
+
+# ── Fonts ─────────────────────────────────────────────────────────────────────
 FONT_TITLE = ("Segoe UI", 16, "bold")
 FONT_MAIN  = ("Segoe UI", 10)
-FONT_SUB   = ("Segoe UI", 9)
+FONT_SMALL = ("Segoe UI", 9)
 
-CONTROL_H  = 1
-GAP        = 6
-CARD_PAD   = 10
-LABEL_WIDTH = 8
+# ── Layout constants ──────────────────────────────────────────────────────────
+CONTROL_HEIGHT = 1
+LAYOUT_GAP     = 6
+CARD_PADDING   = 10
+LABEL_WIDTH    = 8
 
-SPECIAL_KEYS = {
+# ── Key maps ──────────────────────────────────────────────────────────────────
+SPECIAL_KEY_MAP = {
     "space": Key.space, "enter": Key.enter, "tab": Key.tab,
     "backspace": Key.backspace, "delete": Key.delete,
     "escape": Key.esc, "esc": Key.esc,
@@ -46,7 +52,7 @@ SPECIAL_KEYS = {
     "shift": Key.shift, "ctrl": Key.ctrl, "alt": Key.alt,
 }
 
-NUMPAD_KEYS = {
+NUMPAD_KEY_MAP = {
     "num": Key.num_lock,
     "numlock": Key.num_lock,
     "numpad_0": KeyCode.from_vk(96),
@@ -59,16 +65,16 @@ NUMPAD_KEYS = {
     "numpad_7": KeyCode.from_vk(103),
     "numpad_8": KeyCode.from_vk(104),
     "numpad_9": KeyCode.from_vk(105),
-    "numpad_multiply": KeyCode.from_vk(106),
-    "numpad_add": KeyCode.from_vk(107),
+    "numpad_multiply":  KeyCode.from_vk(106),
+    "numpad_add":       KeyCode.from_vk(107),
     "numpad_separator": KeyCode.from_vk(108),
-    "numpad_subtract": KeyCode.from_vk(109),
-    "numpad_decimal": KeyCode.from_vk(110),
-    "numpad_divide": KeyCode.from_vk(111),
+    "numpad_subtract":  KeyCode.from_vk(109),
+    "numpad_decimal":   KeyCode.from_vk(110),
+    "numpad_divide":    KeyCode.from_vk(111),
 }
 
-NUMPAD_VK_NAMES = {
-    96: "numpad_0", 97: "numpad_1", 98: "numpad_2", 99: "numpad_3",
+NUMPAD_VK_TO_NAME = {
+    96: "numpad_0",  97: "numpad_1",  98: "numpad_2",  99: "numpad_3",
     100: "numpad_4", 101: "numpad_5", 102: "numpad_6", 103: "numpad_7",
     104: "numpad_8", 105: "numpad_9", 106: "numpad_multiply",
     107: "numpad_add", 108: "numpad_separator", 109: "numpad_subtract",
@@ -88,51 +94,82 @@ DEFAULT_CONFIG = {
     },
     "random_move": {
         "min_sec": 5,
-        "max_sec": 20
-    }
+        "max_sec": 20,
+        "delay_ms": 100,
+    },
+    "window_position": "top-left",
+    "transparency": 0.9,
+    "always_on_top": True,
+    "compact_mode": False
 }
 
-kb_ctrl = Controller()
+keyboard_controller = Controller()
 
 
-def resolve_key(k):
-    kl = k.lower().strip()
-    if kl in SPECIAL_KEYS:
-        return SPECIAL_KEYS[kl]
-    if kl in NUMPAD_KEYS:
-        return NUMPAD_KEYS[kl]
-    if len(k) == 1:
-        return k
+# ── Key utilities ─────────────────────────────────────────────────────────────
+
+def resolve_key(key_name: str):
+    """Resolve a key name string to a pynput Key or character."""
+    normalized = key_name.lower().strip()
+    if normalized in SPECIAL_KEY_MAP:
+        return SPECIAL_KEY_MAP[normalized]
+    if normalized in NUMPAD_KEY_MAP:
+        return NUMPAD_KEY_MAP[normalized]
+    if len(key_name) == 1:
+        return key_name
     try:
-        return getattr(Key, kl)
+        return getattr(Key, normalized)
     except AttributeError:
         return None
 
 
-def normalize_trigger_key(value):
-    if value is None:
+def normalize_hotkey(key_value) -> str | None:
+    """Normalize a pynput key object or string to a consistent string form."""
+    if key_value is None:
         return None
-    if hasattr(value, "vk") and value.vk is not None:
-        if value.vk in NUMPAD_VK_NAMES:
-            return NUMPAD_VK_NAMES[value.vk]
-        return f"vk:{value.vk}"
-    if hasattr(value, "name") and value.name:
-        return value.name.lower()
-    if hasattr(value, "char") and value.char:
-        return f"char:{value.char.lower()}"
-    text = str(value).strip().lower()
+    if hasattr(key_value, "vk") and key_value.vk is not None:
+        if key_value.vk in NUMPAD_VK_TO_NAME:
+            return NUMPAD_VK_TO_NAME[key_value.vk]
+        return f"vk:{key_value.vk}"
+    if hasattr(key_value, "name") and key_value.name:
+        return key_value.name.lower()
+    if hasattr(key_value, "char") and key_value.char:
+        return f"char:{key_value.char.lower()}"
+    text = str(key_value).strip().lower()
     if not text:
         return None
-    if text in SPECIAL_KEYS:
+    if text in SPECIAL_KEY_MAP:
         return text
-    if text in NUMPAD_KEYS:
+    if text in NUMPAD_KEY_MAP:
         return text
     if len(text) == 1:
         return f"char:{text}"
     return text
 
 
-def load_config():
+def _vk_to_numpad_name(vk: int) -> str | None:
+    """Convert a virtual key code to a numpad name string, or None."""
+    if 96 <= vk <= 105:
+        return f"NUMPAD_{vk - 96}"
+    return {
+        106: "NUMPAD_MULTIPLY",
+        107: "NUMPAD_ADD",
+        108: "NUMPAD_SEPARATOR",
+        109: "NUMPAD_SUBTRACT",
+        110: "NUMPAD_DECIMAL",
+        111: "NUMPAD_DIVIDE",
+    }.get(vk)
+
+
+def _vk_to_numpad_name_lower(vk: int) -> str | None:
+    """Convert a virtual key code to a lowercase numpad name string, or None."""
+    result = _vk_to_numpad_name(vk)
+    return result.lower() if result else None
+
+
+# ── Config I/O ────────────────────────────────────────────────────────────────
+
+def load_config() -> dict:
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
@@ -143,951 +180,1157 @@ def load_config():
     return dict(DEFAULT_CONFIG)
 
 
-def save_config(cfg):
+def save_config(config: dict) -> None:
     with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+        json.dump(config, f, indent=2)
 
+
+# ── Main App ──────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Auto Key Presser")
         self.resizable(True, True)
-        self.configure(bg=BG_MAIN)
+        self.configure(bg=COLOR_BG_MAIN)
         self.minsize(420, 400)
-        self.cfg = load_config()
-        self.running_presser = False
-        self.running_random = False
-        self.press_threads = []
-        self.random_thread = None
+
+        self.config_data = load_config()
+        self.is_presser_running = False
+        self.is_random_running  = False
+        self.press_threads:     list[threading.Thread] = []
+        self.random_thread:     threading.Thread | None = None
         self.individual_threads = None
-        self.listener = None
-        self.pressed_keys = set()
-        self.capturing_key = False
-        self.capturing_random_key = False
-        self.capturing_add_key = False
-        self.unsaved_changes = False
+        self.hotkey_listener:   keyboard.Listener | None = None
+        self.held_keys:         set = set()
+
+        self.is_capturing_presser_hotkey = False
+        self.is_capturing_random_hotkey  = False
+        self.is_capturing_add_key        = False
+        self.has_unsaved_changes = False
+
         self._resize_after_id = None
-        self._compact_layout = None
+        self._compact_layout  = None
+        self.is_compact_mode  = self.config_data.get("compact_mode", False)
 
         self.bind('<Configure>', self._on_window_resize)
         self._build_ui()
-        self._start_listener()
+        self._apply_window_settings()
+        self._start_hotkey_listener()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        
+
         self.update_idletasks()
         self._fit_window_to_content()
 
-    # ── helpers ──────────────────────────────────────────────
+    # ── UI state helpers ──────────────────────────────────────────────────────
 
-    def _update_start_button_state(self):
-        # Disabled config control updating state, buttons are now always normal
-        pass
+    def _update_action_button_state(self):
+        pass  # Buttons are always enabled; reserved for future use.
 
-    def _disable_config_controls(self):
-        if hasattr(self, 'name_entry'):
-            self.name_entry.config(state="disabled")
-            self.name_entry.config(insertofftime=0)
-        if hasattr(self, 'delay_spin'):
-            self.delay_spin.config(state="disabled")
+    def _disable_settings_controls(self):
+        if hasattr(self, 'key_set_name_entry'):
+            self.key_set_name_entry.config(state="disabled", insertofftime=0)
+        if hasattr(self, 'delay_spinbox'):
+            self.delay_spinbox.config(state="disabled")
         if hasattr(self, 'interval_buttons'):
             for btn in self.interval_buttons:
                 btn.config(state="disabled")
-        if hasattr(self, 'use_every_chk'):
-            self.use_every_chk.config(state="disabled")
-        if hasattr(self, 'once_btn'):
-            self.once_btn.config(state="disabled")
-        if hasattr(self, 'infinity_btn'):
-            self.infinity_btn.config(state="disabled")
+        if hasattr(self, 'use_every_checkbox'):
+            self.use_every_checkbox.config(state="disabled")
+        if hasattr(self, 'repeat_once_btn'):
+            self.repeat_once_btn.config(state="disabled")
+        if hasattr(self, 'repeat_infinity_btn'):
+            self.repeat_infinity_btn.config(state="disabled")
         if hasattr(self, 'add_key_btn'):
             self.add_key_btn.config(state="disabled")
+        if hasattr(self, 'random_delay_spinbox'):
+            self.random_delay_spinbox.config(state="disabled")
         if hasattr(self, 'save_btn'):
             self.save_btn.config(state="disabled")
-        self._refresh_wrapped_key_chips()
+        self._refresh_key_chips()
 
-    def _enable_config_controls(self):
-        if hasattr(self, 'name_entry'):
-            self.name_entry.config(state="normal")
-            self.name_entry.config(insertofftime=600)
-        if hasattr(self, 'delay_spin'):
-            self.delay_spin.config(state="normal")
+    def _enable_settings_controls(self):
+        if hasattr(self, 'key_set_name_entry'):
+            self.key_set_name_entry.config(state="normal", insertofftime=600)
+        if hasattr(self, 'delay_spinbox'):
+            self.delay_spinbox.config(state="normal")
         if hasattr(self, 'interval_buttons'):
-            use_every = self.cfg.get("key_set", {}).get("use_every", True)
+            use_every = self.config_data.get("key_set", {}).get("use_every", True)
             for btn in self.interval_buttons:
                 btn.config(state="normal" if use_every else "disabled")
-        if hasattr(self, 'use_every_chk'):
-            self.use_every_chk.config(state="normal")
-        if hasattr(self, 'once_btn'):
-            self.once_btn.config(state="normal")
-        if hasattr(self, 'infinity_btn'):
-            self.infinity_btn.config(state="normal")
+        if hasattr(self, 'use_every_checkbox'):
+            self.use_every_checkbox.config(state="normal")
+        if hasattr(self, 'repeat_once_btn'):
+            self.repeat_once_btn.config(state="normal")
+        if hasattr(self, 'repeat_infinity_btn'):
+            self.repeat_infinity_btn.config(state="normal")
         if hasattr(self, 'add_key_btn'):
             self.add_key_btn.config(state="normal")
+        if hasattr(self, 'random_delay_spinbox'):
+            self.random_delay_spinbox.config(state="normal")
         if hasattr(self, 'save_btn'):
             self.save_btn.config(state="normal")
-        self._refresh_wrapped_key_chips()
+        self._refresh_key_chips()
+
+    # ── Window geometry ───────────────────────────────────────────────────────
 
     def _fit_window_to_content(self):
         self.update_idletasks()
-        content_height = self.winfo_reqheight()
-        screen_height = self.winfo_screenheight()
-        window_height = min(content_height + 20, int(screen_height * 0.9))
-        
-        screen_width = self.winfo_screenwidth()
-        window_width = min(520, int(screen_width * 0.35))
-        
-        x = (screen_width - window_width) // 2
-        y = (screen_height - window_height) // 2
+        content_height  = self.winfo_reqheight()
+        screen_height   = self.winfo_screenheight()
+        window_height   = min(content_height + 20, int(screen_height * 0.9))
+        window_width    = min(520, int(self.winfo_screenwidth() * 0.35))
+        position_key    = self.config_data.get("window_position", "top-left")
+        x, y = self._calculate_window_position(window_width, window_height, position_key)
         self.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
-    def _btn(self, parent, text, cmd):
-        b = tk.Button(parent, text=text, command=cmd,
-                      bg=BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
-                      relief="flat", bd=0, cursor="hand2",
-                      activebackground=COLOR_ACCENT, activeforeground=COLOR_TEXT,
-                      padx=14)
-        b.bind("<Enter>", lambda e: b.config(bg=COLOR_ACCENT, fg=COLOR_TEXT))
-        b.bind("<Leave>", lambda e: b.config(bg=BG_INPUT, fg=COLOR_HOVER))
-        return b
+    def _calculate_window_position(self, width: int, height: int, position: str) -> tuple[int, int]:
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        positions = {
+            "top-left":     (10, 10),
+            "top-right":    (sw - width - 10, 10),
+            "bottom-left":  (10, sh - height - 10),
+            "bottom-right": (sw - width - 10, sh - height - 10),
+        }
+        return positions.get(position, ((sw - width) // 2, (sh - height) // 2))
 
-    def _grid(self, widget, **kwargs):
-        kwargs.setdefault("ipady", CONTROL_H)
+    def _apply_window_settings(self):
+        self.attributes('-alpha',   self.config_data.get("transparency", 0.9))
+        self.attributes('-topmost', self.config_data.get("always_on_top", True))
+
+    # ── Widget factory helpers ────────────────────────────────────────────────
+
+    def _make_button(self, parent, label: str, command) -> tk.Button:
+        btn = tk.Button(
+            parent, text=label, command=command,
+            bg=COLOR_BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
+            relief="flat", bd=0, cursor="hand2",
+            activebackground=COLOR_ACCENT, activeforeground=COLOR_TEXT,
+            padx=14,
+        )
+        btn.bind("<Enter>", lambda e: btn.config(bg=COLOR_ACCENT,   fg=COLOR_TEXT))
+        btn.bind("<Leave>", lambda e: btn.config(bg=COLOR_BG_INPUT, fg=COLOR_HOVER))
+        return btn
+
+    def _grid_widget(self, widget, **kwargs):
+        kwargs.setdefault("ipady", CONTROL_HEIGHT)
         widget.grid(**kwargs)
         return widget
 
-    def _pack(self, widget, **kwargs):
-        kwargs.setdefault("ipady", CONTROL_H)
+    def _pack_widget(self, widget, **kwargs):
+        kwargs.setdefault("ipady", CONTROL_HEIGHT)
         widget.pack(**kwargs)
         return widget
 
-    def _sep(self, parent):
+    def _add_separator(self, parent):
         tk.Frame(parent, bg=COLOR_BORDER, height=1).pack(fill="x")
 
-    def _label(self, parent, text, width=None):
-        kw = {"font": FONT_SUB, "bg": parent["bg"], "fg": COLOR_TEXT_MUTED, "anchor": "w"}
+    def _make_label(self, parent, text: str, width: int = None) -> tk.Label:
+        kw = {"font": FONT_SMALL, "bg": parent["bg"], "fg": COLOR_TEXT_MUTED, "anchor": "w"}
         if width:
             kw["width"] = width
         return tk.Label(parent, text=text, **kw)
 
-    # ── UI build ─────────────────────────────────────────────
+    # ── UI build ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # header
-        hdr = tk.Frame(self, bg=BG_MAIN)
-        hdr.pack(fill="x", padx=CARD_PAD, pady=(CARD_PAD, 0))
-        tk.Label(hdr, text="MOD PRESSER", font=FONT_TITLE,
-                 bg=BG_MAIN, fg=COLOR_HOVER).pack(side="left")
-        self.status_lbl = tk.Label(hdr, text="IDLE", font=FONT_SUB,
-                                   bg=BG_MAIN, fg=COLOR_TEXT_MUTED)
-        self.status_lbl.pack(side="right")
+        for widget in self.winfo_children():
+            widget.destroy()
+        if self.is_compact_mode:
+            self._build_compact_ui()
+        else:
+            self._build_full_ui()
+        self._update_action_button_state()
+        self._apply_responsive_layout(self.winfo_width())
 
-        # body
-        body = tk.Frame(self, bg=BG_MAIN)
-        body.pack(fill="both", expand=True, padx=CARD_PAD, pady=CARD_PAD)
+    def _build_full_ui(self):
+        # Header
+        header_frame = tk.Frame(self, bg=COLOR_BG_MAIN)
+        header_frame.pack(fill="x", padx=CARD_PADDING, pady=(CARD_PADDING, 0))
+        tk.Label(header_frame, text="MOD PRESSER", font=FONT_TITLE,
+                 bg=COLOR_BG_MAIN, fg=COLOR_HOVER).pack(side="left")
+        self.status_label = tk.Label(header_frame, text="IDLE", font=FONT_SMALL,
+                                     bg=COLOR_BG_MAIN, fg=COLOR_TEXT_MUTED)
+        self.status_label.pack(side="right")
 
-        # trigger controls row (Auto Presser on left, Random Move on right)
-        self._sep(body)
-        self._label(body, "GLOBAL TRIGGER KEYS").pack(fill="x", pady=(GAP, 2))
-        tr = tk.Frame(body, bg=BG_MAIN)
-        tr.pack(fill="x", pady=(0, GAP))
-        tr.grid_columnconfigure(0, weight=1)
-        tr.grid_columnconfigure(2, weight=1)
-        self.trigger_row = tr
+        # Body
+        body = tk.Frame(self, bg=COLOR_BG_MAIN)
+        body.pack(fill="both", expand=True, padx=CARD_PADDING, pady=CARD_PADDING)
 
-        # Left Column: Presser Trigger
-        col1 = tk.Frame(tr, bg=BG_MAIN)
-        self._grid(col1, row=0, column=0, sticky="ew")
-        self._label(col1, "AUTO PRESSER").pack(fill="x", pady=(0, 2))
-        tr_presser = tk.Frame(col1, bg=BG_MAIN)
-        tr_presser.pack(fill="x")
-        tr_presser.grid_columnconfigure(0, weight=1)
-        
-        self.trigger_key_btn = tk.Button(tr_presser,
-            text=self.cfg.get("start_stop_key", "numpad_decimal"),
-            bg=BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
+        # Global trigger keys row
+        self._add_separator(body)
+        self._make_label(body, "GLOBAL TRIGGER KEYS").pack(fill="x", pady=(LAYOUT_GAP, 2))
+        trigger_row = tk.Frame(body, bg=COLOR_BG_MAIN)
+        trigger_row.pack(fill="x", pady=(0, LAYOUT_GAP))
+        trigger_row.grid_columnconfigure(0, weight=1)
+        trigger_row.grid_columnconfigure(2, weight=1)
+        self.trigger_row = trigger_row
+
+        # Left: Presser hotkey
+        presser_col = tk.Frame(trigger_row, bg=COLOR_BG_MAIN)
+        self._grid_widget(presser_col, row=0, column=0, sticky="ew")
+        self._make_label(presser_col, "AUTO PRESSER").pack(fill="x", pady=(0, 2))
+        presser_hotkey_row = tk.Frame(presser_col, bg=COLOR_BG_MAIN)
+        presser_hotkey_row.pack(fill="x")
+        presser_hotkey_row.grid_columnconfigure(0, weight=1)
+
+        self.presser_hotkey_display_btn = tk.Button(
+            presser_hotkey_row,
+            text=self.config_data.get("start_stop_key", "numpad_decimal"),
+            bg=COLOR_BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
             relief="flat", bd=0, cursor="arrow",
-            state="disabled", disabledforeground=COLOR_HOVER)
-        self._grid(self.trigger_key_btn, row=0, column=0, sticky="ew")
+            state="disabled", disabledforeground=COLOR_HOVER,
+        )
+        self._grid_widget(self.presser_hotkey_display_btn, row=0, column=0, sticky="ew")
+        self.presser_hotkey_change_btn = self._make_button(
+            presser_hotkey_row, "CHANGE", self._begin_presser_hotkey_capture
+        )
+        self._grid_widget(self.presser_hotkey_change_btn, row=0, column=1, padx=(LAYOUT_GAP, 0), sticky="e")
 
-        self.trigger_change_btn = self._btn(tr_presser, "CHANGE", self._start_key_capture)
-        self._grid(self.trigger_change_btn, row=0, column=1, padx=(GAP, 0), sticky="e")
+        # Spacer
+        tk.Frame(trigger_row, bg=COLOR_BG_MAIN, width=20).grid(row=0, column=1, sticky="ns")
 
-        # Gap between columns
-        tk.Frame(tr, bg=BG_MAIN, width=20).grid(row=0, column=1, sticky="ns")
+        # Right: Random hotkey
+        random_col = tk.Frame(trigger_row, bg=COLOR_BG_MAIN)
+        self._grid_widget(random_col, row=0, column=2, sticky="ew")
+        self._make_label(random_col, "RANDOM MOVE").pack(fill="x", pady=(0, 2))
+        random_hotkey_row = tk.Frame(random_col, bg=COLOR_BG_MAIN)
+        random_hotkey_row.pack(fill="x")
+        random_hotkey_row.grid_columnconfigure(0, weight=1)
 
-        # Right Column: Random Trigger
-        col2 = tk.Frame(tr, bg=BG_MAIN)
-        self._grid(col2, row=0, column=2, sticky="ew")
-        self._label(col2, "RANDOM MOVE").pack(fill="x", pady=(0, 2))
-        tr_random = tk.Frame(col2, bg=BG_MAIN)
-        tr_random.pack(fill="x")
-        tr_random.grid_columnconfigure(0, weight=1)
-
-        self.trigger_random_key_btn = tk.Button(tr_random,
-            text=self.cfg.get("random_start_stop_key", "numpad_multiply"),
-            bg=BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
+        self.random_hotkey_display_btn = tk.Button(
+            random_hotkey_row,
+            text=self.config_data.get("random_start_stop_key", "numpad_multiply"),
+            bg=COLOR_BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
             relief="flat", bd=0, cursor="arrow",
-            state="disabled", disabledforeground=COLOR_HOVER)
-        self._grid(self.trigger_random_key_btn, row=0, column=0, sticky="ew")
+            state="disabled", disabledforeground=COLOR_HOVER,
+        )
+        self._grid_widget(self.random_hotkey_display_btn, row=0, column=0, sticky="ew")
+        self.random_hotkey_change_btn = self._make_button(
+            random_hotkey_row, "CHANGE", self._begin_random_hotkey_capture
+        )
+        self._grid_widget(self.random_hotkey_change_btn, row=0, column=1, padx=(LAYOUT_GAP, 0), sticky="e")
 
-        self.trigger_random_change_btn = self._btn(tr_random, "CHANGE", self._start_random_key_capture)
-        self._grid(self.trigger_random_change_btn, row=0, column=1, padx=(GAP, 0), sticky="e")
-
-        # Key set card
-        self._sep(body)
-        self.key_set_frame = tk.Frame(body, bg=BG_MAIN)
-        self.key_set_frame.pack(fill="both", expand=True, pady=(GAP, 0))
-        self.key_set_ui_components = {}
+        # Key set section
+        self._add_separator(body)
+        self.key_set_frame = tk.Frame(body, bg=COLOR_BG_MAIN)
+        self.key_set_frame.pack(fill="both", expand=True, pady=(LAYOUT_GAP, 0))
+        self.key_set_widget_refs = {}
         self._build_key_set_section()
 
-        # Random move settings card
-        self._sep(body)
-        self.random_frame = tk.Frame(body, bg=BG_MAIN)
-        self.random_frame.pack(fill="both", expand=True, pady=(GAP, 0))
-        self._build_random_section()
+        # Random move section
+        self._add_separator(body)
+        self.random_move_frame = tk.Frame(body, bg=COLOR_BG_MAIN)
+        self.random_move_frame.pack(fill="both", expand=True, pady=(LAYOUT_GAP, 0))
+        self._build_random_move_section()
 
-        # footer
-        self._sep(body)
-        bf = tk.Frame(body, bg=BG_MAIN)
-        bf.pack(fill="x", pady=(GAP, 0))
-        bf.grid_columnconfigure(0, weight=1)
-        self.footer_frame = bf
+        # Window settings section
+        self._add_separator(body)
+        self.window_settings_frame = tk.Frame(body, bg=COLOR_BG_MAIN)
+        self.window_settings_frame.pack(fill="both", expand=True, pady=(LAYOUT_GAP, 0))
+        self._build_window_settings_section()
 
-        self.save_btn = self._btn(bf, "SAVE ALL SETTINGS", self._save)
-        self._grid(self.save_btn, row=0, column=0, sticky="ew")
-        
-        self._update_start_button_state()
+        # Footer
+        self._add_separator(body)
+        footer = tk.Frame(body, bg=COLOR_BG_MAIN)
+        footer.pack(fill="x", pady=(LAYOUT_GAP, 0))
+        footer.grid_columnconfigure(0, weight=1)
+        footer.grid_columnconfigure(1, weight=1)
+        self.footer_frame = footer
 
-        self._apply_responsive_layout(self.winfo_width())
+        self.save_btn = self._make_button(footer, "SAVE ALL SETTINGS", self._save_config)
+        self._grid_widget(self.save_btn, row=0, column=0, sticky="ew", padx=(0, LAYOUT_GAP))
+
+        self.compact_toggle_btn = self._make_button(footer, "COMPACT MODE", self._toggle_compact_mode_ui)
+        self._grid_widget(self.compact_toggle_btn, row=0, column=1, sticky="ew")
+
+    def _build_compact_ui(self):
+        # Header
+        header_frame = tk.Frame(self, bg=COLOR_BG_MAIN)
+        header_frame.pack(fill="x", padx=CARD_PADDING, pady=(CARD_PADDING, 0))
+        tk.Label(header_frame, text="MOD PRESSER", font=FONT_TITLE,
+                 bg=COLOR_BG_MAIN, fg=COLOR_HOVER).pack(side="left")
+        self.status_label = tk.Label(header_frame, text="IDLE", font=FONT_SMALL,
+                                     bg=COLOR_BG_MAIN, fg=COLOR_TEXT_MUTED)
+        self.status_label.pack(side="right")
+
+        body = tk.Frame(self, bg=COLOR_BG_MAIN)
+        body.pack(fill="both", expand=True, padx=CARD_PADDING, pady=CARD_PADDING)
+
+        # Presser card
+        self._add_separator(body)
+        presser_card = tk.Frame(body, bg=COLOR_BG_CARD)
+        presser_card.pack(fill="x", pady=(LAYOUT_GAP, 0))
+        ph = tk.Frame(presser_card, bg=COLOR_BG_CARD)
+        ph.pack(fill="x", padx=CARD_PADDING, pady=(CARD_PADDING, 0))
+        tk.Label(ph, text="AUTO PRESSER", font=FONT_MAIN, bg=COLOR_BG_CARD, fg=COLOR_HOVER).pack(side="left")
+        pa = tk.Frame(presser_card, bg=COLOR_BG_CARD)
+        pa.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, CARD_PADDING))
+        self.toggle_presser_btn = self._make_button(pa, "START AUTO PRESSER", self._toggle_presser)
+        self.toggle_presser_btn.pack(fill="x", ipady=4)
+
+        # Random move card
+        self._add_separator(body)
+        random_card = tk.Frame(body, bg=COLOR_BG_CARD)
+        random_card.pack(fill="x", pady=(LAYOUT_GAP, 0))
+        rh = tk.Frame(random_card, bg=COLOR_BG_CARD)
+        rh.pack(fill="x", padx=CARD_PADDING, pady=(CARD_PADDING, 0))
+        tk.Label(rh, text="RANDOM MOVE", font=FONT_MAIN, bg=COLOR_BG_CARD, fg=COLOR_HOVER).pack(side="left")
+        ra = tk.Frame(random_card, bg=COLOR_BG_CARD)
+        ra.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, CARD_PADDING))
+        self.toggle_random_btn = self._make_button(ra, "START RANDOM MOVE", self._toggle_random)
+        self.toggle_random_btn.pack(fill="x", ipady=4)
+
+        # Footer
+        self._add_separator(body)
+        footer = tk.Frame(body, bg=COLOR_BG_MAIN)
+        footer.pack(fill="x", pady=(LAYOUT_GAP, 0))
+        footer.grid_columnconfigure(0, weight=1)
+        self.compact_toggle_btn = self._make_button(footer, "FULL MODE", self._toggle_compact_mode_ui)
+        self._grid_widget(self.compact_toggle_btn, row=0, column=0, sticky="ew")
 
     def _build_key_set_section(self):
         for w in self.key_set_frame.winfo_children():
             w.destroy()
-        self.key_set_ui_components.clear()
+        self.key_set_widget_refs.clear()
 
-        key_set = self.cfg.get("key_set", {})
+        key_set = self.config_data.get("key_set", {})
         if not key_set:
-            key_set = {"name": "Key Set", "keys": [], "delay_ms": 100,
-                       "repeat_interval_sec": 30, "use_every": True,
-                       "repeat": "Infinity Mode"}
-            self.cfg["key_set"] = key_set
+            key_set = {
+                "name": "Key Set", "keys": [], "delay_ms": 100,
+                "repeat_interval_sec": 30, "use_every": True, "repeat": "Infinity Mode",
+            }
+            self.config_data["key_set"] = key_set
         else:
-            if "repeat_interval_sec" not in key_set:
-                key_set["repeat_interval_sec"] = 30
+            key_set.setdefault("repeat_interval_sec", 30)
 
         self._build_key_set_card(key_set)
-
-        self.after_idle(self._refresh_wrapped_key_chips)
+        self.after_idle(self._refresh_key_chips)
         self.after_idle(lambda: self._apply_responsive_layout(self.winfo_width()))
 
-    def _build_key_set_card(self, key_set):
-        card = tk.Frame(self.key_set_frame, bg=BG_CARD)
-        card.pack(fill="x", expand=False, pady=(0, GAP))
+    def _build_key_set_card(self, key_set: dict):
+        card = tk.Frame(self.key_set_frame, bg=COLOR_BG_CARD)
+        card.pack(fill="x", expand=False, pady=(0, LAYOUT_GAP))
 
-        # header: name
-        hf = tk.Frame(card, bg=BG_CARD)
-        hf.pack(fill="x", padx=CARD_PAD, pady=(CARD_PAD, 0))
-        hf.grid_columnconfigure(0, weight=1)
-
+        # Name entry
+        name_header = tk.Frame(card, bg=COLOR_BG_CARD)
+        name_header.pack(fill="x", padx=CARD_PADDING, pady=(CARD_PADDING, 0))
+        name_header.grid_columnconfigure(0, weight=1)
         name_var = tk.StringVar(value=key_set.get("name", "Key Set"))
-        name_entry = tk.Entry(hf, textvariable=name_var, font=FONT_MAIN,
-                              bg=BG_CARD, fg=COLOR_HOVER, insertbackground=COLOR_HOVER,
-                              relief="flat", bd=0)
-        self._grid(name_entry, row=0, column=0, sticky="ew")
-        name_entry.bind("<FocusOut>", lambda e, v=name_var: self._update_key_set_name(v.get()))
-        name_entry.bind("<Return>", lambda e, v=name_var: self._update_key_set_name(v.get()))
-        self.name_entry = name_entry
+        name_entry = tk.Entry(
+            name_header, textvariable=name_var, font=FONT_MAIN,
+            bg=COLOR_BG_CARD, fg=COLOR_HOVER, insertbackground=COLOR_HOVER,
+            relief="flat", bd=0,
+        )
+        self._grid_widget(name_entry, row=0, column=0, sticky="ew")
+        name_entry.bind("<FocusOut>", lambda e, v=name_var: self._on_key_set_name_change(v.get()))
+        name_entry.bind("<Return>",   lambda e, v=name_var: self._on_key_set_name_change(v.get()))
+        self.key_set_name_entry = name_entry
 
-        # keys chips
-        cf = tk.Frame(card, bg=BG_CARD)
-        cf.pack(fill="x", padx=CARD_PAD, pady=(GAP, 0))
-        cf.grid_columnconfigure(1, weight=1)
-        self._label(cf, "Keys", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(GAP, GAP))
-        keys_container = tk.Frame(cf, bg=BG_INPUT)
-        keys_container.grid(row=0, column=1, sticky="ew", padx=(GAP, 0))
-        self._render_key_set_chips(keys_container, key_set.get("keys", []))
+        # Key chips row
+        chips_row = tk.Frame(card, bg=COLOR_BG_CARD)
+        chips_row.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
+        chips_row.grid_columnconfigure(1, weight=1)
+        self._make_label(chips_row, "Keys", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        chips_container = tk.Frame(chips_row, bg=COLOR_BG_INPUT)
+        chips_container.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
+        self._render_key_chips(chips_container, key_set.get("keys", []))
 
-        # settings
-        sf = tk.Frame(card, bg=BG_CARD)
-        sf.pack(fill="x", padx=CARD_PAD, pady=(GAP, 0))
+        # Settings rows
+        settings_frame = tk.Frame(card, bg=COLOR_BG_CARD)
+        settings_frame.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
 
-        # delay row
-        dr = tk.Frame(sf, bg=BG_CARD)
-        dr.pack(fill="x", pady=(0, 2))
-        dr.grid_columnconfigure(2, weight=1)
-        self._label(dr, "Delay", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(GAP, GAP))
+        # Delay
+        delay_row = tk.Frame(settings_frame, bg=COLOR_BG_CARD)
+        delay_row.pack(fill="x", pady=(0, 2))
+        delay_row.grid_columnconfigure(2, weight=1)
+        self._make_label(delay_row, "Delay", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
         delay_var = tk.IntVar(value=key_set.get("delay_ms", 100))
-        delay_spin = tk.Spinbox(dr, from_=1, to=60000, textvariable=delay_var,
-                                font=FONT_MAIN, bg=BG_INPUT, fg=COLOR_TEXT,
-                                insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
-                                buttonbackground=BG_INPUT, width=6,
-                                command=lambda v=delay_var: self._update_delay(v.get()))
-        self._grid(delay_spin, row=0, column=1, sticky="w", padx=(GAP, 0))
-        delay_spin.bind("<KeyRelease>", lambda e, v=delay_var: self._update_delay(v.get()))
-        delay_spin.bind("<Return>", lambda e: self.focus_set())
-        self._label(dr, "ms").grid(row=0, column=2, sticky="w", padx=(GAP, 0))
-        self.delay_spin = delay_spin
+        delay_spinbox = tk.Spinbox(
+            delay_row, from_=1, to=60000, textvariable=delay_var,
+            font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
+            buttonbackground=COLOR_BG_INPUT, width=6,
+            command=lambda v=delay_var: self._on_delay_change(v.get()),
+        )
+        self._grid_widget(delay_spinbox, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        delay_spinbox.bind("<KeyRelease>", lambda e, v=delay_var: self._on_delay_change(v.get()))
+        delay_spinbox.bind("<Return>", lambda e: self.focus_set())
+        self._make_label(delay_row, "ms").grid(row=0, column=2, sticky="w", padx=(LAYOUT_GAP, 0))
+        self.delay_spinbox = delay_spinbox
 
-        # every row
-        er = tk.Frame(sf, bg=BG_CARD)
-        er.pack(fill="x", pady=(0, 2))
-        er.grid_columnconfigure(3, weight=1)
-        self._label(er, "Every", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(GAP, GAP))
-        use_every_var = tk.BooleanVar(value=key_set.get("use_every", True))
-        repeat_interval_var = tk.IntVar(value=key_set.get("repeat_interval_sec", 30))
-        
-        use_every_chk = tk.Checkbutton(er, text="Use", variable=use_every_var,
-                                       command=lambda v=use_every_var: self._update_use_every(v.get()),
-                                       bg=BG_CARD, fg=COLOR_TEXT_MUTED, activebackground=BG_CARD,
-                                       activeforeground=COLOR_TEXT, selectcolor=BG_INPUT,
-                                       relief="flat", bd=0, font=FONT_SUB)
-        self._grid(use_every_chk, row=0, column=1, sticky="w", padx=(GAP, GAP))
-        
-        interval_btns_frame = tk.Frame(er, bg=BG_CARD)
-        self._grid(interval_btns_frame, row=0, column=2, sticky="w", padx=(GAP, GAP))
-        
-        interval_values = [10, 20, 30, 60]
+        # Repeat interval
+        interval_row = tk.Frame(settings_frame, bg=COLOR_BG_CARD)
+        interval_row.pack(fill="x", pady=(0, 2))
+        interval_row.grid_columnconfigure(3, weight=1)
+        self._make_label(interval_row, "Every", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+
+        use_every_var        = tk.BooleanVar(value=key_set.get("use_every", True))
+        repeat_interval_var  = tk.IntVar(value=key_set.get("repeat_interval_sec", 30))
+
+        use_every_checkbox = tk.Checkbutton(
+            interval_row, text="Use", variable=use_every_var,
+            command=lambda v=use_every_var: self._on_use_every_change(v.get()),
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, activebackground=COLOR_BG_CARD,
+            activeforeground=COLOR_TEXT, selectcolor=COLOR_BG_INPUT,
+            relief="flat", bd=0, font=FONT_SMALL,
+        )
+        self._grid_widget(use_every_checkbox, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+
+        interval_btn_frame = tk.Frame(interval_row, bg=COLOR_BG_CARD)
+        self._grid_widget(interval_btn_frame, row=0, column=2, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+
+        interval_options = [10, 20, 30, 60]
         self.interval_buttons = []
-        for i, val in enumerate(interval_values):
-            btn = tk.Button(interval_btns_frame, text=str(val),
-                           bg=COLOR_ACCENT if repeat_interval_var.get() == val else BG_INPUT,
-                           fg=COLOR_TEXT if repeat_interval_var.get() == val else COLOR_TEXT_MUTED,
-                           font=FONT_MAIN,
-                           relief="flat", bd=0, cursor="hand2",
-                           state="normal" if use_every_var.get() else "disabled",
-                           width=5,
-                           command=lambda v=val: self._update_repeat_interval(v))
+        for val in interval_options:
+            is_selected = repeat_interval_var.get() == val
+            btn = tk.Button(
+                interval_btn_frame, text=str(val),
+                bg=COLOR_ACCENT if is_selected else COLOR_BG_INPUT,
+                fg=COLOR_TEXT  if is_selected else COLOR_TEXT_MUTED,
+                font=FONT_MAIN, relief="flat", bd=0, cursor="hand2",
+                state="normal" if use_every_var.get() else "disabled",
+                width=5,
+                command=lambda v=val: self._on_repeat_interval_change(v),
+            )
             btn.pack(side="left", padx=2)
             self.interval_buttons.append(btn)
-        
-        self._label(er, "s").grid(row=0, column=3, sticky="w", padx=(GAP, 0))
-        self.use_every_chk = use_every_chk
+
+        self._make_label(interval_row, "s").grid(row=0, column=3, sticky="w", padx=(LAYOUT_GAP, 0))
+        self.use_every_checkbox  = use_every_checkbox
         self.repeat_interval_var = repeat_interval_var
 
-        # repeat row
-        rr = tk.Frame(sf, bg=BG_CARD)
-        rr.pack(fill="x", pady=(0, 2))
-        self._label(rr, "Repeat", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(GAP, GAP))
-        
+        # Repeat mode
+        repeat_row = tk.Frame(settings_frame, bg=COLOR_BG_CARD)
+        repeat_row.pack(fill="x", pady=(0, 2))
+        self._make_label(repeat_row, "Repeat", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+
         repeat_mode_var = tk.StringVar(value=key_set.get("repeat", "Infinity Mode"))
-        
-        once_btn = tk.Button(rr, text="ONCE",
-                            bg=COLOR_ACCENT if repeat_mode_var.get() == "Once" else BG_INPUT,
-                            fg=COLOR_TEXT if repeat_mode_var.get() == "Once" else COLOR_TEXT_MUTED,
-                            font=FONT_MAIN,
-                            relief="flat", bd=0, cursor="hand2",
-                            width=10,
-                            command=lambda: self._set_repeat_mode("Once", repeat_mode_var, once_btn, infinity_btn))
-        self._grid(once_btn, row=0, column=1, sticky="w", padx=(GAP, GAP))
-        once_btn.bind("<Enter>", lambda e: once_btn.config(bg=COLOR_HOVER if repeat_mode_var.get() == "Once" else COLOR_ACCENT, fg=COLOR_TEXT))
-        once_btn.bind("<Leave>", lambda e: once_btn.config(bg=COLOR_ACCENT if repeat_mode_var.get() == "Once" else BG_INPUT, fg=COLOR_TEXT if repeat_mode_var.get() == "Once" else COLOR_TEXT_MUTED))
-        
-        infinity_btn = tk.Button(rr, text="INFINITY",
-                                 bg=COLOR_ACCENT if repeat_mode_var.get() == "Infinity Mode" else BG_INPUT,
-                                 fg=COLOR_TEXT if repeat_mode_var.get() == "Infinity Mode" else COLOR_TEXT_MUTED,
-                                 font=FONT_MAIN,
-                                 relief="flat", bd=0, cursor="hand2",
-                                 width=10,
-                                 command=lambda: self._set_repeat_mode("Infinity Mode", repeat_mode_var, once_btn, infinity_btn))
-        self._grid(infinity_btn, row=0, column=2, sticky="w", padx=(GAP, GAP))
-        infinity_btn.bind("<Enter>", lambda e: infinity_btn.config(bg=COLOR_HOVER if repeat_mode_var.get() == "Infinity Mode" else COLOR_ACCENT, fg=COLOR_TEXT))
-        infinity_btn.bind("<Leave>", lambda e: infinity_btn.config(bg=COLOR_ACCENT if repeat_mode_var.get() == "Infinity Mode" else BG_INPUT, fg=COLOR_TEXT if repeat_mode_var.get() == "Infinity Mode" else COLOR_TEXT_MUTED))
-        self.once_btn = once_btn
-        self.infinity_btn = infinity_btn
 
-        # add key row
-        af = tk.Frame(card, bg=BG_CARD)
-        af.pack(fill="x", padx=CARD_PAD, pady=(GAP, 0))
-        af.grid_columnconfigure(1, weight=1)
-        self._label(af, "Add", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(GAP, GAP))
-        
-        self.add_key_btn = tk.Button(af, text="PRESS KEY TO ADD",
-                                     bg=BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
-                                     relief="flat", bd=0, cursor="hand2",
-                                     command=self._start_add_key_capture)
-        self._grid(self.add_key_btn, row=0, column=1, sticky="ew", padx=(GAP, GAP))
-        self.add_key_btn.bind("<Enter>", lambda e: self.add_key_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT))
-        self.add_key_btn.bind("<Leave>", lambda e: self.add_key_btn.config(bg=BG_INPUT, fg=COLOR_HOVER))
+        repeat_once_btn = tk.Button(
+            repeat_row, text="ONCE", width=10,
+            bg=COLOR_ACCENT if repeat_mode_var.get() == "Once" else COLOR_BG_INPUT,
+            fg=COLOR_TEXT  if repeat_mode_var.get() == "Once" else COLOR_TEXT_MUTED,
+            font=FONT_MAIN, relief="flat", bd=0, cursor="hand2",
+            command=lambda: self._on_repeat_mode_change("Once", repeat_mode_var, repeat_once_btn, repeat_infinity_btn),
+        )
+        self._grid_widget(repeat_once_btn, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        repeat_once_btn.bind("<Enter>", lambda e: repeat_once_btn.config(
+            bg=COLOR_HOVER if repeat_mode_var.get() == "Once" else COLOR_ACCENT, fg=COLOR_TEXT))
+        repeat_once_btn.bind("<Leave>", lambda e: repeat_once_btn.config(
+            bg=COLOR_ACCENT if repeat_mode_var.get() == "Once" else COLOR_BG_INPUT,
+            fg=COLOR_TEXT if repeat_mode_var.get() == "Once" else COLOR_TEXT_MUTED))
 
-        # action row (START/STOP for Presser)
-        act = tk.Frame(card, bg=BG_CARD)
-        act.pack(fill="x", padx=CARD_PAD, pady=(GAP, CARD_PAD))
-        self.toggle_presser_btn = self._btn(act, "START AUTO PRESSER", self._toggle_presser)
+        repeat_infinity_btn = tk.Button(
+            repeat_row, text="INFINITY", width=10,
+            bg=COLOR_ACCENT if repeat_mode_var.get() == "Infinity Mode" else COLOR_BG_INPUT,
+            fg=COLOR_TEXT  if repeat_mode_var.get() == "Infinity Mode" else COLOR_TEXT_MUTED,
+            font=FONT_MAIN, relief="flat", bd=0, cursor="hand2",
+            command=lambda: self._on_repeat_mode_change("Infinity Mode", repeat_mode_var, repeat_once_btn, repeat_infinity_btn),
+        )
+        self._grid_widget(repeat_infinity_btn, row=0, column=2, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        repeat_infinity_btn.bind("<Enter>", lambda e: repeat_infinity_btn.config(
+            bg=COLOR_HOVER if repeat_mode_var.get() == "Infinity Mode" else COLOR_ACCENT, fg=COLOR_TEXT))
+        repeat_infinity_btn.bind("<Leave>", lambda e: repeat_infinity_btn.config(
+            bg=COLOR_ACCENT if repeat_mode_var.get() == "Infinity Mode" else COLOR_BG_INPUT,
+            fg=COLOR_TEXT if repeat_mode_var.get() == "Infinity Mode" else COLOR_TEXT_MUTED))
+
+        self.repeat_once_btn     = repeat_once_btn
+        self.repeat_infinity_btn = repeat_infinity_btn
+
+        # Add key
+        add_key_row = tk.Frame(card, bg=COLOR_BG_CARD)
+        add_key_row.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
+        add_key_row.grid_columnconfigure(1, weight=1)
+        self._make_label(add_key_row, "Add", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+
+        self.add_key_btn = tk.Button(
+            add_key_row, text="PRESS KEY TO ADD",
+            bg=COLOR_BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
+            relief="flat", bd=0, cursor="hand2",
+            command=self._begin_add_key_capture,
+        )
+        self._grid_widget(self.add_key_btn, row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self.add_key_btn.bind("<Enter>", lambda e: self.add_key_btn.config(bg=COLOR_ACCENT,   fg=COLOR_TEXT))
+        self.add_key_btn.bind("<Leave>", lambda e: self.add_key_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_HOVER))
+
+        # Start/stop presser
+        action_row = tk.Frame(card, bg=COLOR_BG_CARD)
+        action_row.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, CARD_PADDING))
+        self.toggle_presser_btn = self._make_button(action_row, "START AUTO PRESSER", self._toggle_presser)
         self.toggle_presser_btn.pack(fill="x", ipady=4)
 
-        self.key_set_ui_components = {
-            'name_var': name_var,
-            'delay_var': delay_var,
+        self.key_set_widget_refs = {
+            'name_var':            name_var,
+            'delay_var':           delay_var,
             'repeat_interval_var': repeat_interval_var,
-            'use_every_var': use_every_var,
-            'repeat_mode_var': repeat_mode_var,
-            'once_btn': once_btn,
-            'infinity_btn': infinity_btn,
-            'chips_frame': keys_container
+            'use_every_var':       use_every_var,
+            'repeat_mode_var':     repeat_mode_var,
+            'repeat_once_btn':     repeat_once_btn,
+            'repeat_infinity_btn': repeat_infinity_btn,
+            'chips_container':     chips_container,
         }
 
-    def _build_random_section(self):
-        for w in self.random_frame.winfo_children():
+    def _build_random_move_section(self):
+        for w in self.random_move_frame.winfo_children():
             w.destroy()
 
-        random_move = self.cfg.get("random_move", {})
-        if not random_move:
-            random_move = {"min_sec": 5, "max_sec": 20}
-            self.cfg["random_move"] = random_move
+        random_cfg = self.config_data.get("random_move", {})
+        if not random_cfg:
+            random_cfg = {"min_sec": 5, "max_sec": 20, "delay_ms": 100}
+            self.config_data["random_move"] = random_cfg
+        else:
+            random_cfg.setdefault("delay_ms", 100)
 
-        card = tk.Frame(self.random_frame, bg=BG_CARD)
-        card.pack(fill="x", expand=False, pady=(0, GAP))
+        card = tk.Frame(self.random_move_frame, bg=COLOR_BG_CARD)
+        card.pack(fill="x", expand=False, pady=(0, LAYOUT_GAP))
 
-        # header
-        hf = tk.Frame(card, bg=BG_CARD)
-        hf.pack(fill="x", padx=CARD_PAD, pady=(CARD_PAD, 0))
-        tk.Label(hf, text="RANDOM MOVE (WASD)", font=FONT_MAIN,
-                bg=BG_CARD, fg=COLOR_HOVER).pack(side="left")
+        header = tk.Frame(card, bg=COLOR_BG_CARD)
+        header.pack(fill="x", padx=CARD_PADDING, pady=(CARD_PADDING, 0))
+        tk.Label(header, text="RANDOM MOVE (WASD)", font=FONT_MAIN,
+                 bg=COLOR_BG_CARD, fg=COLOR_HOVER).pack(side="left")
 
-        # settings
-        sf = tk.Frame(card, bg=BG_CARD)
-        sf.pack(fill="x", padx=CARD_PAD, pady=(GAP, 0))
+        settings = tk.Frame(card, bg=COLOR_BG_CARD)
+        settings.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
 
-        # min row
-        mr = tk.Frame(sf, bg=BG_CARD)
-        mr.pack(fill="x", pady=(0, 2))
-        mr.grid_columnconfigure(2, weight=1)
-        self._label(mr, "Min", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(GAP, GAP))
-        min_var = tk.IntVar(value=random_move.get("min_sec", 5))
-        min_spin = tk.Spinbox(mr, from_=1, to=60, textvariable=min_var,
-                                   font=FONT_MAIN, bg=BG_INPUT, fg=COLOR_TEXT,
-                                   insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
-                                   buttonbackground=BG_INPUT, width=6,
-                                   command=lambda v=min_var: self._update_min_sec(v.get()))
-        self._grid(min_spin, row=0, column=1, sticky="w", padx=(GAP, 0))
-        min_spin.bind("<KeyRelease>", lambda e, v=min_var: self._update_min_sec(v.get()))
-        min_spin.bind("<Return>", lambda e: self.focus_set())
-        self._label(mr, "sec").grid(row=0, column=2, sticky="w", padx=(GAP, 0))
-        self.min_spin = min_spin
+        # Min row
+        min_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        min_row.pack(fill="x", pady=(0, 2))
+        min_row.grid_columnconfigure(2, weight=1)
+        self._make_label(min_row, "Min", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        min_var = tk.IntVar(value=random_cfg.get("min_sec", 5))
+        min_spinbox = tk.Spinbox(
+            min_row, from_=1, to=60, textvariable=min_var,
+            font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
+            buttonbackground=COLOR_BG_INPUT, width=6,
+            command=lambda v=min_var: self._on_random_min_change(v.get()),
+        )
+        self._grid_widget(min_spinbox, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        min_spinbox.bind("<KeyRelease>", lambda e, v=min_var: self._on_random_min_change(v.get()))
+        min_spinbox.bind("<Return>", lambda e: self.focus_set())
+        self._make_label(min_row, "sec").grid(row=0, column=2, sticky="w", padx=(LAYOUT_GAP, 0))
+        self.min_spinbox = min_spinbox
 
-        # max row
-        xr = tk.Frame(sf, bg=BG_CARD)
-        xr.pack(fill="x", pady=(0, 2))
-        xr.grid_columnconfigure(2, weight=1)
-        self._label(xr, "Max", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(GAP, GAP))
-        max_var = tk.IntVar(value=random_move.get("max_sec", 20))
-        max_spin = tk.Spinbox(xr, from_=1, to=60, textvariable=max_var,
-                                   font=FONT_MAIN, bg=BG_INPUT, fg=COLOR_TEXT,
-                                   insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
-                                   buttonbackground=BG_INPUT, width=6,
-                                   command=lambda v=max_var: self._update_max_sec(v.get()))
-        self._grid(max_spin, row=0, column=1, sticky="w", padx=(GAP, 0))
-        max_spin.bind("<KeyRelease>", lambda e, v=max_var: self._update_max_sec(v.get()))
-        max_spin.bind("<Return>", lambda e: self.focus_set())
-        self._label(xr, "sec").grid(row=0, column=2, sticky="w", padx=(GAP, 0))
-        self.max_spin = max_spin
+        # Max row
+        max_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        max_row.pack(fill="x", pady=(0, 2))
+        max_row.grid_columnconfigure(2, weight=1)
+        self._make_label(max_row, "Max", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        max_var = tk.IntVar(value=random_cfg.get("max_sec", 20))
+        max_spinbox = tk.Spinbox(
+            max_row, from_=1, to=60, textvariable=max_var,
+            font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
+            buttonbackground=COLOR_BG_INPUT, width=6,
+            command=lambda v=max_var: self._on_random_max_change(v.get()),
+        )
+        self._grid_widget(max_spinbox, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        max_spinbox.bind("<KeyRelease>", lambda e, v=max_var: self._on_random_max_change(v.get()))
+        max_spinbox.bind("<Return>", lambda e: self.focus_set())
+        self._make_label(max_row, "sec").grid(row=0, column=2, sticky="w", padx=(LAYOUT_GAP, 0))
+        self.max_spinbox = max_spinbox
 
-        # info
-        info = tk.Label(card, text="Randomly press W/A/S/D keys",
-                       font=FONT_SUB, bg=BG_CARD, fg=COLOR_TEXT_MUTED)
-        info.pack(padx=CARD_PAD, pady=(GAP, 0))
+        # Delay row
+        delay_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        delay_row.pack(fill="x", pady=(0, 2))
+        delay_row.grid_columnconfigure(2, weight=1)
+        self._make_label(delay_row, "Delay", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        random_delay_var = tk.IntVar(value=random_cfg.get("delay_ms", 100))
+        random_delay_spinbox = tk.Spinbox(
+            delay_row, from_=1, to=60000, textvariable=random_delay_var,
+            font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
+            buttonbackground=COLOR_BG_INPUT, width=6,
+            command=lambda v=random_delay_var: self._on_random_delay_change(v.get()),
+        )
+        self._grid_widget(random_delay_spinbox, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        random_delay_spinbox.bind("<KeyRelease>", lambda e, v=random_delay_var: self._on_random_delay_change(v.get()))
+        random_delay_spinbox.bind("<Return>", lambda e: self.focus_set())
+        self._make_label(delay_row, "ms").grid(row=0, column=2, sticky="w", padx=(LAYOUT_GAP, 0))
+        self.random_delay_spinbox = random_delay_spinbox
 
-        # action row (START/STOP for Random Move)
-        act = tk.Frame(card, bg=BG_CARD)
-        act.pack(fill="x", padx=CARD_PAD, pady=(GAP, CARD_PAD))
-        self.toggle_random_btn = self._btn(act, "START RANDOM MOVE", self._toggle_random)
+        tk.Label(card, text="Randomly press W/A/S/D keys",
+                 font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED).pack(padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
+
+        action_row = tk.Frame(card, bg=COLOR_BG_CARD)
+        action_row.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, CARD_PADDING))
+        self.toggle_random_btn = self._make_button(action_row, "START RANDOM MOVE", self._toggle_random)
         self.toggle_random_btn.pack(fill="x", ipady=4)
 
-    # ── chips ────────────────────────────────────────────────
+    def _build_window_settings_section(self):
+        for w in self.window_settings_frame.winfo_children():
+            w.destroy()
 
-    def _render_key_set_chips(self, chips_frame, keys):
-        for w in chips_frame.winfo_children():
+        card = tk.Frame(self.window_settings_frame, bg=COLOR_BG_CARD)
+        card.pack(fill="x", expand=False, pady=(0, LAYOUT_GAP))
+
+        header = tk.Frame(card, bg=COLOR_BG_CARD)
+        header.pack(fill="x", padx=CARD_PADDING, pady=(CARD_PADDING, 0))
+        tk.Label(header, text="WINDOW SETTINGS", font=FONT_MAIN,
+                 bg=COLOR_BG_CARD, fg=COLOR_HOVER).pack(side="left")
+
+        settings = tk.Frame(card, bg=COLOR_BG_CARD)
+        settings.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
+
+        # Position
+        position_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        position_row.pack(fill="x", pady=(0, 2))
+        self._make_label(position_row, "Position", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        position_var = tk.StringVar(value=self.config_data.get("window_position", "top-left"))
+        position_btn_frame = tk.Frame(position_row, bg=COLOR_BG_CARD)
+        position_btn_frame.grid(row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+
+        position_options = ["top-left", "top-right", "bottom-left", "bottom-right"]
+        self.position_buttons = []
+        for pos in position_options:
+            is_active = position_var.get() == pos
+            btn = tk.Button(
+                position_btn_frame, text=pos.replace("-", " ").title(), width=12,
+                bg=COLOR_ACCENT if is_active else COLOR_BG_INPUT,
+                fg=COLOR_TEXT  if is_active else COLOR_TEXT_MUTED,
+                font=FONT_SMALL, relief="flat", bd=0, cursor="hand2",
+                command=lambda p=pos: self._on_window_position_change(p),
+            )
+            btn.pack(side="left", padx=2)
+            self.position_buttons.append(btn)
+        self.position_var = position_var
+
+        # Transparency
+        opacity_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        opacity_row.pack(fill="x", pady=(0, 2))
+        opacity_row.grid_columnconfigure(2, weight=1)
+        self._make_label(opacity_row, "Opacity", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        opacity_var = tk.DoubleVar(value=self.config_data.get("transparency", 0.9))
+        opacity_scale = tk.Scale(
+            opacity_row, from_=0.1, to=1.0, resolution=0.05,
+            orient="horizontal", variable=opacity_var,
+            command=self._on_opacity_change,
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT, troughcolor=COLOR_BG_INPUT,
+            highlightthickness=0, font=FONT_SMALL, length=150,
+        )
+        opacity_scale.grid(row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        self.opacity_var = opacity_var
+
+        # Always on top
+        on_top_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        on_top_row.pack(fill="x", pady=(0, 2))
+        self._make_label(on_top_row, "On Top", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        always_on_top_var = tk.BooleanVar(value=self.config_data.get("always_on_top", True))
+        always_on_top_chk = tk.Checkbutton(
+            on_top_row, variable=always_on_top_var,
+            command=lambda v=always_on_top_var: self._on_always_on_top_change(v.get()),
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, activebackground=COLOR_BG_CARD,
+            activeforeground=COLOR_TEXT, selectcolor=COLOR_BG_INPUT,
+            relief="flat", bd=0, font=FONT_SMALL,
+        )
+        always_on_top_chk.grid(row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        self.always_on_top_var = always_on_top_var
+
+        # Compact mode
+        compact_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        compact_row.pack(fill="x", pady=(0, 2))
+        self._make_label(compact_row, "Compact", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        compact_mode_var = tk.BooleanVar(value=self.config_data.get("compact_mode", False))
+        compact_mode_chk = tk.Checkbutton(
+            compact_row, variable=compact_mode_var,
+            command=lambda v=compact_mode_var: self._on_compact_mode_change(v.get()),
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, activebackground=COLOR_BG_CARD,
+            activeforeground=COLOR_TEXT, selectcolor=COLOR_BG_INPUT,
+            relief="flat", bd=0, font=FONT_SMALL,
+        )
+        compact_mode_chk.grid(row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        self.compact_mode_var = compact_mode_var
+
+    # ── Key chips ─────────────────────────────────────────────────────────────
+
+    def _render_key_chips(self, chips_container, keys: list):
+        for w in chips_container.winfo_children():
             w.destroy()
         if not keys:
-            self._label(chips_frame, "No keys").pack(padx=4, pady=2)
+            self._make_label(chips_container, "No keys").pack(padx=4, pady=2)
             return
 
-        chips_frame.update_idletasks()
-        available_width = chips_frame.winfo_width()
+        chips_container.update_idletasks()
+        available_width = chips_container.winfo_width()
         if available_width <= 1:
-            available_width = chips_frame.winfo_reqwidth()
+            available_width = chips_container.winfo_reqwidth()
         if available_width <= 1:
             available_width = max(200, self.winfo_width() - 160)
 
-        row_frame = tk.Frame(chips_frame, bg=BG_INPUT)
-        row_frame.pack(fill="x", anchor="w")
+        current_row = tk.Frame(chips_container, bg=COLOR_BG_INPUT)
+        current_row.pack(fill="x", anchor="w")
         used_width = 0
 
-        for i, k in enumerate(keys):
-            est = max(44, len(k) * 8 + 34)
-            if used_width and used_width + est > available_width:
-                row_frame = tk.Frame(chips_frame, bg=BG_INPUT)
-                row_frame.pack(fill="x", anchor="w", pady=(2, 0))
+        for idx, key_name in enumerate(keys):
+            estimated_width = max(44, len(key_name) * 8 + 34)
+            if used_width and used_width + estimated_width > available_width:
+                current_row = tk.Frame(chips_container, bg=COLOR_BG_INPUT)
+                current_row.pack(fill="x", anchor="w", pady=(2, 0))
                 used_width = 0
 
-            chip = tk.Frame(row_frame, bg=BG_MAIN)
+            chip = tk.Frame(current_row, bg=COLOR_BG_MAIN)
             chip.pack(side="left", padx=1, pady=1)
-            tk.Label(chip, text=k, font=FONT_MAIN, bg=BG_MAIN, fg=COLOR_HOVER,
-                     padx=4, pady=1).pack(side="left")
-            xl = tk.Label(chip, text="X", font=FONT_MAIN, bg=BG_MAIN, fg=COLOR_TEXT_MUTED,
-                          cursor="hand2", padx=2)
-            xl.pack(side="left")
-            xl.bind("<Button-1>", lambda e, idx=i: self._remove_key_from_set(idx))
-            xl.bind("<Enter>", lambda e, w=xl: w.config(fg=COLOR_DANGER))
-            xl.bind("<Leave>", lambda e, w=xl: w.config(fg=COLOR_TEXT_MUTED))
-            used_width += est
+            tk.Label(chip, text=key_name, font=FONT_MAIN, bg=COLOR_BG_MAIN,
+                     fg=COLOR_HOVER, padx=4, pady=1).pack(side="left")
+            remove_label = tk.Label(chip, text="X", font=FONT_MAIN, bg=COLOR_BG_MAIN,
+                                    fg=COLOR_TEXT_MUTED, cursor="hand2", padx=2)
+            remove_label.pack(side="left")
+            remove_label.bind("<Button-1>", lambda e, i=idx: self._remove_key_at_index(i))
+            remove_label.bind("<Enter>",    lambda e, w=remove_label: w.config(fg=COLOR_DANGER))
+            remove_label.bind("<Leave>",    lambda e, w=remove_label: w.config(fg=COLOR_TEXT_MUTED))
+            used_width += estimated_width
 
-    def _refresh_wrapped_key_chips(self):
-        key_set = self.cfg.get("key_set", {})
-        if self.key_set_ui_components:
-            self._render_key_set_chips(self.key_set_ui_components['chips_frame'],
-                                       key_set.get('keys', []))
-
-    # ── responsive ───────────────────────────────────────────
-
-    def _apply_responsive_layout(self, window_width):
-        pass
-
-    # ── data mutations ───────────────────────────────────────
-
-    def _update_key_set_name(self, name):
-        if self.running_presser:
+    def _refresh_key_chips(self):
+        if not self.key_set_widget_refs:
             return
-        key_set = self.cfg.get("key_set", {})
-        key_set["name"] = name
-        self.unsaved_changes = True
-        self._update_start_button_state()
+        chips_container = self.key_set_widget_refs.get('chips_container')
+        if not chips_container or not chips_container.winfo_exists():
+            return
+        keys = self.config_data.get("key_set", {}).get('keys', [])
+        self._render_key_chips(chips_container, keys)
 
-    def _add_key_to_set(self, key_string):
-        if self.running_presser:
+    # ── Responsive layout ─────────────────────────────────────────────────────
+
+    def _apply_responsive_layout(self, window_width: int):
+        pass  # Reserved for future responsive breakpoints.
+
+    # ── Config mutation handlers ──────────────────────────────────────────────
+
+    def _on_key_set_name_change(self, name: str):
+        if self.is_presser_running:
             return
-        if not key_string.strip():
+        self.config_data.get("key_set", {})["name"] = name
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
+
+    def _add_keys_from_string(self, key_string: str):
+        if self.is_presser_running or not key_string.strip():
             return
-        key_set = self.cfg.get("key_set", {})
-        for k in re.split(r"[,\s]+", key_string):
-            k = k.strip()
-            if k:
-                key_set.setdefault("keys", []).append(k)
-        self.unsaved_changes = True
-        self._update_start_button_state()
+        key_set = self.config_data.get("key_set", {})
+        for token in re.split(r"[,\s]+", key_string):
+            token = token.strip()
+            if token:
+                key_set.setdefault("keys", []).append(token)
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
         self._build_key_set_section()
 
-    def _update_delay(self, value):
-        if self.running_presser:
+    def _on_delay_change(self, value):
+        if self.is_presser_running:
             return
-        key_set = self.cfg.get("key_set", {})
-        key_set["delay_ms"] = value
-        self.unsaved_changes = True
-        self._update_start_button_state()
+        self.config_data.get("key_set", {})["delay_ms"] = value
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
 
-    def _update_repeat_interval(self, value):
-        if self.running_presser:
+    def _on_repeat_interval_change(self, value: int):
+        if self.is_presser_running:
             return
-        key_set = self.cfg.get("key_set", {})
-        key_set["repeat_interval_sec"] = value
+        self.config_data.get("key_set", {})["repeat_interval_sec"] = value
         self.repeat_interval_var.set(value)
-        self.unsaved_changes = True
-        self._update_start_button_state()
-        
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
         if hasattr(self, 'interval_buttons'):
-            interval_values = [10, 20, 30, 60]
+            interval_options = [10, 20, 30, 60]
             for i, btn in enumerate(self.interval_buttons):
-                btn.config(bg=COLOR_ACCENT if interval_values[i] == value else BG_INPUT,
-                          fg=COLOR_TEXT if interval_values[i] == value else COLOR_TEXT_MUTED)
+                btn.config(
+                    bg=COLOR_ACCENT if interval_options[i] == value else COLOR_BG_INPUT,
+                    fg=COLOR_TEXT  if interval_options[i] == value else COLOR_TEXT_MUTED,
+                )
 
-    def _update_use_every(self, value):
-        if self.running_presser:
+    def _on_use_every_change(self, value: bool):
+        if self.is_presser_running:
             return
-        key_set = self.cfg.get("key_set", {})
-        key_set["use_every"] = bool(value)
+        self.config_data.get("key_set", {})["use_every"] = bool(value)
         if hasattr(self, 'interval_buttons'):
             for btn in self.interval_buttons:
                 btn.config(state="normal" if value else "disabled")
-        self.unsaved_changes = True
-        self._update_start_button_state()
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
 
-    def _set_repeat_mode(self, mode, var, once_btn, infinity_btn):
-        if self.running_presser:
+    def _on_repeat_mode_change(self, mode: str, mode_var, once_btn, infinity_btn):
+        if self.is_presser_running:
             return
-        var.set(mode)
-        key_set = self.cfg.get("key_set", {})
-        key_set["repeat"] = mode
-        self.unsaved_changes = True
-        self._update_start_button_state()
-        
+        mode_var.set(mode)
+        self.config_data.get("key_set", {})["repeat"] = mode
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
         if mode == "Once":
             once_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
-            infinity_btn.config(bg=BG_INPUT, fg=COLOR_TEXT_MUTED)
+            infinity_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
         else:
-            once_btn.config(bg=BG_INPUT, fg=COLOR_TEXT_MUTED)
+            once_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
             infinity_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
 
-    def _remove_key_from_set(self, key_index):
-        if self.running_presser:
+    def _remove_key_at_index(self, key_index: int):
+        if self.is_presser_running:
             return
-        key_set = self.cfg.get("key_set", {})
-        keys = key_set.get("keys", [])
+        keys = self.config_data.get("key_set", {}).get("keys", [])
         if key_index < len(keys):
             keys.pop(key_index)
-            self.unsaved_changes = True
-            self._update_start_button_state()
+            self.has_unsaved_changes = True
+            self._update_action_button_state()
             self._build_key_set_section()
 
-    def _update_min_sec(self, value):
-        if self.running_random:
+    def _on_random_min_change(self, value):
+        if self.is_random_running:
             return
-        random_move = self.cfg.get("random_move", {})
-        random_move["min_sec"] = value
-        self.unsaved_changes = True
-        self._update_start_button_state()
+        self.config_data.get("random_move", {})["min_sec"] = value
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
 
-    def _update_max_sec(self, value):
-        if self.running_random:
+    def _on_random_max_change(self, value):
+        if self.is_random_running:
             return
-        random_move = self.cfg.get("random_move", {})
-        random_move["max_sec"] = value
-        self.unsaved_changes = True
-        self._update_start_button_state()
+        self.config_data.get("random_move", {})["max_sec"] = value
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
 
-    # ── global start / stop ──────────────────────────────────
+    def _on_random_delay_change(self, value):
+        if self.is_random_running:
+            return
+        self.config_data.get("random_move", {})["delay_ms"] = value
+        self.has_unsaved_changes = True
+        self._update_action_button_state()
 
-    def _get_config(self):
+    def _on_window_position_change(self, position: str):
+        self.config_data["window_position"] = position
+        self.position_var.set(position)
+        self.has_unsaved_changes = True
+        position_options = ["top-left", "top-right", "bottom-left", "bottom-right"]
+        for i, btn in enumerate(self.position_buttons):
+            btn.config(
+                bg=COLOR_ACCENT if position_options[i] == position else COLOR_BG_INPUT,
+                fg=COLOR_TEXT  if position_options[i] == position else COLOR_TEXT_MUTED,
+            )
+        self.update_idletasks()
+        x, y = self._calculate_window_position(self.winfo_width(), self.winfo_height(), position)
+        self.geometry(f"+{x}+{y}")
+
+    def _on_opacity_change(self, value):
+        self.config_data["transparency"] = float(value)
+        self.attributes('-alpha', float(value))
+        self.has_unsaved_changes = True
+
+    def _on_always_on_top_change(self, value: bool):
+        self.config_data["always_on_top"] = bool(value)
+        self.attributes('-topmost', bool(value))
+        self.has_unsaved_changes = True
+
+    def _on_compact_mode_change(self, value: bool):
+        self.config_data["compact_mode"] = bool(value)
+        self.is_compact_mode = bool(value)
+        self.has_unsaved_changes = True
+        self._build_ui()
+        self._apply_window_settings()
+        self.update_idletasks()
+        self._fit_window_to_content()
+
+    def _toggle_compact_mode_ui(self):
+        self.is_compact_mode = not self.is_compact_mode
+        self.config_data["compact_mode"] = self.is_compact_mode
+        self.has_unsaved_changes = True
+        self._build_ui()
+        self._apply_window_settings()
+        self.update_idletasks()
+        self._fit_window_to_content()
+
+    # ── Start / stop actions ──────────────────────────────────────────────────
+
+    def _collect_current_config(self) -> dict:
         return {
-            "start_stop_key": self.cfg.get("start_stop_key", "numpad_decimal"),
-            "random_start_stop_key": self.cfg.get("random_start_stop_key", "numpad_multiply"),
-            "key_set": self.cfg.get("key_set", {}),
-            "random_move": self.cfg.get("random_move", {})
+            "start_stop_key":        self.config_data.get("start_stop_key", "numpad_decimal"),
+            "random_start_stop_key": self.config_data.get("random_start_stop_key", "numpad_multiply"),
+            "key_set":               self.config_data.get("key_set", {}),
+            "random_move":           self.config_data.get("random_move", {}),
+            "window_position":       self.config_data.get("window_position", "top-left"),
+            "transparency":          self.config_data.get("transparency", 0.9),
+            "always_on_top":         self.config_data.get("always_on_top", True),
+            "compact_mode":          self.config_data.get("compact_mode", False),
         }
 
-    def _save(self):
-        if self.running_presser or self.running_random:
+    def _save_config(self):
+        if self.is_presser_running or self.is_random_running:
             messagebox.showwarning("Cannot Save", "Cannot save configuration while running.", parent=self)
             return
-        self.cfg = self._get_config()
-        save_config(self.cfg)
-        self._restart_listener()
-        self.unsaved_changes = False
-        self._update_start_button_state()
+        self.config_data = self._collect_current_config()
+        save_config(self.config_data)
+        self._restart_hotkey_listener()
+        self.has_unsaved_changes = False
+        self._update_action_button_state()
         messagebox.showinfo("Saved", "Config saved!", parent=self)
 
     def _toggle_presser(self):
-        if self.running_presser:
+        if self.is_presser_running:
             self._stop_presser()
         else:
-            self.cfg = self._get_config()
+            self.config_data = self._collect_current_config()
             self._start_presser()
 
     def _start_presser(self):
-        self.running_presser = True
+        self.is_presser_running = True
         self.toggle_presser_btn.config(text="STOP AUTO PRESSER", bg=COLOR_DANGER, activebackground="#cc2233")
         self.toggle_presser_btn.bind("<Enter>", lambda e: self.toggle_presser_btn.config(bg="#cc2233"))
         self.toggle_presser_btn.bind("<Leave>", lambda e: self.toggle_presser_btn.config(bg=COLOR_DANGER))
-        
-        self.status_lbl.config(text="RUNNING - AUTO PRESSER ACTIVE", fg=COLOR_SUCCESS)
-        self._disable_config_controls()
+        self.status_label.config(text="RUNNING - AUTO PRESSER ACTIVE", fg=COLOR_SUCCESS)
+        self._disable_settings_controls()
 
-        key_set = self.cfg.get("key_set", {})
-        repeat = key_set.get("repeat", "Infinity Mode")
-        keys = key_set.get("keys", [])
+        key_set        = self.config_data.get("key_set", {})
+        keys           = key_set.get("keys", [])
+        repeat_mode    = key_set.get("repeat", "Infinity Mode")
+        delay_s        = key_set.get("delay_ms", 100) / 1000.0
+        repeat_interval_s = key_set.get("repeat_interval_sec", 1) * 1000 / 1000.0
+        use_every      = key_set.get("use_every", True)
+
         if keys:
-            delay = key_set.get("delay_ms", 100) / 1000.0
-            repeat_interval = key_set.get("repeat_interval_sec", 1) * 1000 / 1000.0
-            use_every = key_set.get("use_every", True)
             thread = threading.Thread(
-                target=self._press_loop,
-                args=(keys, delay, repeat_interval, repeat, use_every),
-                daemon=True)
+                target=self._presser_loop,
+                args=(keys, delay_s, repeat_interval_s, repeat_mode, use_every),
+                daemon=True,
+            )
             thread.start()
             self.press_threads.append(thread)
 
     def _stop_presser(self):
-        self.running_presser = False
+        self.is_presser_running = False
         self.individual_threads = None
         self.toggle_presser_btn.config(text="START AUTO PRESSER", bg=COLOR_ACCENT, activebackground=COLOR_HOVER)
         self.toggle_presser_btn.bind("<Enter>", lambda e: self.toggle_presser_btn.config(bg=COLOR_HOVER))
         self.toggle_presser_btn.bind("<Leave>", lambda e: self.toggle_presser_btn.config(bg=COLOR_ACCENT))
-        self.status_lbl.config(text="IDLE" if not self.running_random else "RUNNING - RANDOM MOVE ACTIVE", fg=COLOR_TEXT_MUTED if not self.running_random else COLOR_SUCCESS)
+        status_text  = "IDLE" if not self.is_random_running else "RUNNING - RANDOM MOVE ACTIVE"
+        status_color = COLOR_TEXT_MUTED if not self.is_random_running else COLOR_SUCCESS
+        self.status_label.config(text=status_text, fg=status_color)
         self.press_threads.clear()
-        self._enable_config_controls()
+        self._enable_settings_controls()
 
     def _toggle_random(self):
-        if self.running_random:
+        if self.is_random_running:
             self._stop_random()
         else:
-            self.cfg = self._get_config()
+            self.config_data = self._collect_current_config()
             self._start_random()
 
     def _start_random(self):
-        self.running_random = True
+        self.is_random_running = True
         self.toggle_random_btn.config(text="STOP RANDOM MOVE", bg=COLOR_DANGER, activebackground="#cc2233")
         self.toggle_random_btn.bind("<Enter>", lambda e: self.toggle_random_btn.config(bg="#cc2233"))
         self.toggle_random_btn.bind("<Leave>", lambda e: self.toggle_random_btn.config(bg=COLOR_DANGER))
-        
-        self.status_lbl.config(text="RUNNING - RANDOM MOVE ACTIVE", fg=COLOR_SUCCESS)
-        self._disable_config_controls()
+        self.status_label.config(text="RUNNING - RANDOM MOVE ACTIVE", fg=COLOR_SUCCESS)
+        self._disable_settings_controls()
 
-        random_move = self.cfg.get("random_move", {})
-        min_sec = random_move.get("min_sec", 5)
-        max_sec = random_move.get("max_sec", 20)
-        
+        random_cfg = self.config_data.get("random_move", {})
         thread = threading.Thread(
             target=self._random_move_loop,
-            args=(min_sec, max_sec),
-            daemon=True)
+            args=(random_cfg.get("min_sec", 5), random_cfg.get("max_sec", 20), random_cfg.get("delay_ms", 100)),
+            daemon=True,
+        )
         thread.start()
         self.random_thread = thread
 
     def _stop_random(self):
-        self.running_random = False
+        self.is_random_running = False
         self.toggle_random_btn.config(text="START RANDOM MOVE", bg=COLOR_ACCENT, activebackground=COLOR_HOVER)
         self.toggle_random_btn.bind("<Enter>", lambda e: self.toggle_random_btn.config(bg=COLOR_HOVER))
         self.toggle_random_btn.bind("<Leave>", lambda e: self.toggle_random_btn.config(bg=COLOR_ACCENT))
-        self.status_lbl.config(text="IDLE" if not self.running_presser else "RUNNING - AUTO PRESSER ACTIVE", fg=COLOR_TEXT_MUTED if not self.running_presser else COLOR_SUCCESS)
+        status_text  = "IDLE" if not self.is_presser_running else "RUNNING - AUTO PRESSER ACTIVE"
+        status_color = COLOR_TEXT_MUTED if not self.is_presser_running else COLOR_SUCCESS
+        self.status_label.config(text=status_text, fg=status_color)
         self.random_thread = None
-        self._enable_config_controls()
+        self._enable_settings_controls()
 
-    def _press_loop(self, keys, delay_s, repeat_interval_s=1.0, repeat=None, use_every=True):
-        resolved = [resolve_key(k) for k in keys]
-        resolved = [k for k in resolved if k is not None]
-        
-        if repeat == "Once":
-            for key in resolved:
-                if not self.running_presser:
+    # ── Background loops ──────────────────────────────────────────────────────
+
+    def _presser_loop(self, keys: list, delay_s: float, repeat_interval_s: float = 1.0,
+                      repeat_mode: str = None, use_every: bool = True):
+        resolved_keys = [k for k in (resolve_key(k) for k in keys) if k is not None]
+
+        if repeat_mode == "Once":
+            for key in resolved_keys:
+                if not self.is_presser_running:
                     break
-                kb_ctrl.press(key)
+                keyboard_controller.press(key)
                 time.sleep(0.02)
-                kb_ctrl.release(key)
+                keyboard_controller.release(key)
                 time.sleep(delay_s)
-            self.running_presser = False
+            self.is_presser_running = False
             self.after(0, self._stop_presser)
         else:
-            while self.running_presser:
-                for key in resolved:
-                    if not self.running_presser:
+            while self.is_presser_running:
+                for key in resolved_keys:
+                    if not self.is_presser_running:
                         break
-                    kb_ctrl.press(key)
+                    keyboard_controller.press(key)
                     time.sleep(0.02)
-                    kb_ctrl.release(key)
+                    keyboard_controller.release(key)
                     time.sleep(delay_s)
-                if self.running_presser and use_every:
+                if self.is_presser_running and use_every:
                     time.sleep(repeat_interval_s)
 
-    def _random_move_loop(self, min_sec, max_sec):
-        wasd_keys = ['w', 'a', 's', 'd']
-        resolved = [resolve_key(k) for k in wasd_keys]
-        resolved = [k for k in resolved if k is not None]
-        
-        while self.running_random:
-            if not resolved:
+    def _random_move_loop(self, min_sec: float, max_sec: float, delay_ms: int = 100):
+        wasd_keys          = ['w', 'a', 's', 'd']
+        resolved_keys      = [k for k in (resolve_key(k) for k in wasd_keys) if k is not None]
+        TAP_INTERVAL_S     = 0.05   # fixed 50ms between taps
+        between_dir_delay_s = delay_ms / 1000.0
+
+        while self.is_random_running:
+            if not resolved_keys:
                 break
-            
-            # Randomly select a direction key
-            key = random.choice(resolved)
-            
-            # Random hold duration between min and max
+            key           = random.choice(resolved_keys)
             hold_duration = random.uniform(min_sec, max_sec)
-            
-            # Hold for the random duration with key repeat simulation
-            start_time = time.time()
-            repeat_interval = 0.05  # 50ms between repeats (typical keyboard repeat rate)
-            last_repeat = start_time
-            
-            while self.running_random and (time.time() - start_time) < hold_duration:
-                current_time = time.time()
-                if current_time - last_repeat >= repeat_interval:
-                    kb_ctrl.press(key)
-                    kb_ctrl.release(key)
-                    last_repeat = current_time
-                time.sleep(0.01)
-            
-            # Small pause before next move
-            if self.running_random:
-                time.sleep(0.1)
-        
-        self.running_random = False
+            start_time    = time.time()
+
+            # Repeat-tap every 50ms until hold_duration elapsed
+            while self.is_random_running and (time.time() - start_time) < hold_duration:
+                keyboard_controller.press(key)
+                keyboard_controller.release(key)
+                time.sleep(TAP_INTERVAL_S)
+
+            # Pause before next direction
+            if self.is_random_running:
+                time.sleep(between_dir_delay_s)
+
+        self.is_random_running = False
         self.after(0, self._stop_random)
 
-    # ── listener ─────────────────────────────────────────────
+    # ── Hotkey listener ───────────────────────────────────────────────────────
 
-    def _start_listener(self):
-        def on_press(key):
-            if self.capturing_key:
-                self._set_trigger_key(key)
+    def _start_hotkey_listener(self):
+        def on_key_press(key):
+            if self.is_capturing_presser_hotkey:
+                self._apply_presser_hotkey(key)
                 return
-            if self.capturing_random_key:
-                self._set_random_trigger_key(key)
+            if self.is_capturing_random_hotkey:
+                self._apply_random_hotkey(key)
                 return
-            if self.capturing_add_key:
-                self._set_add_key(key)
+            if self.is_capturing_add_key:
+                self._apply_add_key(key)
                 return
-                
-            # Presser global hotkey check
-            tks = self.cfg.get("start_stop_key", "numpad_decimal")
-            matched_presser = normalize_trigger_key(key) == normalize_trigger_key(tks)
-            if not matched_presser:
-                tks_lower = tks.lower()
-                tk_key = resolve_key(tks_lower)
-                matched_presser = (key == tk_key) or \
-                          (hasattr(key, 'name') and key.name and key.name.lower() == tks_lower)
-            if matched_presser and key not in self.pressed_keys:
-                self.pressed_keys.add(key)
+
+            # Presser hotkey
+            presser_hotkey = self.config_data.get("start_stop_key", "numpad_decimal")
+            matched = normalize_hotkey(key) == normalize_hotkey(presser_hotkey)
+            if not matched:
+                resolved = resolve_key(presser_hotkey.lower())
+                matched  = (key == resolved) or (
+                    hasattr(key, 'name') and key.name and key.name.lower() == presser_hotkey.lower()
+                )
+            if matched and key not in self.held_keys:
+                self.held_keys.add(key)
                 self.after(0, self._toggle_presser)
                 return
 
-            # Random move global hotkey check
-            rtks = self.cfg.get("random_start_stop_key", "numpad_multiply")
-            matched_random = normalize_trigger_key(key) == normalize_trigger_key(rtks)
-            if not matched_random:
-                rtks_lower = rtks.lower()
-                rtk_key = resolve_key(rtks_lower)
-                matched_random = (key == rtk_key) or \
-                          (hasattr(key, 'name') and key.name and key.name.lower() == rtks_lower)
-            if matched_random and key not in self.pressed_keys:
-                self.pressed_keys.add(key)
+            # Random hotkey
+            random_hotkey = self.config_data.get("random_start_stop_key", "numpad_multiply")
+            matched = normalize_hotkey(key) == normalize_hotkey(random_hotkey)
+            if not matched:
+                resolved = resolve_key(random_hotkey.lower())
+                matched  = (key == resolved) or (
+                    hasattr(key, 'name') and key.name and key.name.lower() == random_hotkey.lower()
+                )
+            if matched and key not in self.held_keys:
+                self.held_keys.add(key)
                 self.after(0, self._toggle_random)
-                return
 
-        def on_release(key):
-            self.pressed_keys.discard(key)
+        def on_key_release(key):
+            self.held_keys.discard(key)
 
-        self.listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self.listener.daemon = True
-        self.listener.start()
+        self.hotkey_listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
+        self.hotkey_listener.daemon = True
+        self.hotkey_listener.start()
 
-    def _restart_listener(self):
-        if self.listener:
-            self.listener.stop()
-        self._start_listener()
+    def _restart_hotkey_listener(self):
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
+        self._start_hotkey_listener()
 
-    # ── window events ────────────────────────────────────────
+    # ── Window events ─────────────────────────────────────────────────────────
 
     def _on_window_resize(self, event):
         if event.widget != self:
             return
         self._apply_responsive_layout(event.width)
-        if self._resize_after_id is not None:
-            self.after_cancel(self._resize_after_id)
-        self._resize_after_id = self.after(120, self._refresh_wrapped_key_chips)
 
     def _on_close(self):
-        self.running_presser = False
-        self.running_random = False
+        self.is_presser_running = False
+        self.is_random_running  = False
         self.individual_threads = None
-        if self.listener:
-            self.listener.stop()
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
         self.destroy()
 
-    # ── key capture ──────────────────────────────────────────
+    # ── Key capture ───────────────────────────────────────────────────────────
 
-    def _start_key_capture(self):
-        self.capturing_key = True
-        self.trigger_key_btn.config(text="PRESS KEY", bg=COLOR_ACCENT, fg=COLOR_TEXT)
-        self.status_lbl.config(text="PRESS A KEY", fg=COLOR_ACCENT)
+    def _begin_presser_hotkey_capture(self):
+        self.is_capturing_presser_hotkey = True
+        self.presser_hotkey_display_btn.config(text="PRESS KEY", bg=COLOR_ACCENT, fg=COLOR_TEXT)
+        self.status_label.config(text="PRESS A KEY", fg=COLOR_ACCENT)
 
-    def _start_add_key_capture(self):
-        self.capturing_add_key = True
+    def _begin_add_key_capture(self):
+        self.is_capturing_add_key = True
         self.add_key_btn.config(text="PRESS KEY", bg=COLOR_ACCENT, fg=COLOR_TEXT)
-        self.status_lbl.config(text="PRESS A KEY TO ADD", fg=COLOR_ACCENT)
+        self.status_label.config(text="PRESS A KEY TO ADD", fg=COLOR_ACCENT)
 
-    def _set_trigger_key(self, key):
-        if hasattr(key, 'vk') and key.vk is not None:
-            if 96 <= key.vk <= 105:
-                key_str = f"NUMPAD_{key.vk - 96}"
-            elif key.vk == 106:
-                key_str = "NUMPAD_MULTIPLY"
-            elif key.vk == 107:
-                key_str = "NUMPAD_ADD"
-            elif key.vk == 108:
-                key_str = "NUMPAD_SEPARATOR"
-            elif key.vk == 109:
-                key_str = "NUMPAD_SUBTRACT"
-            elif key.vk == 110:
-                key_str = "NUMPAD_DECIMAL"
-            elif key.vk == 111:
-                key_str = "NUMPAD_DIVIDE"
-            else:
-                key_str = None
-        elif hasattr(key, 'name'):
-            key_str = key.name.upper()
-        elif hasattr(key, 'char') and key.char:
-            key_str = key.char.upper()
-        else:
+    def _apply_presser_hotkey(self, key):
+        key_str = self._resolve_captured_key_upper(key)
+        if key_str is None:
             return
+        self.config_data["start_stop_key"] = key_str
+        self.presser_hotkey_display_btn.config(text=key_str, bg=COLOR_BG_INPUT, fg=COLOR_HOVER)
+        self.status_label.config(text="IDLE", fg=COLOR_TEXT_MUTED)
+        self.is_capturing_presser_hotkey = False
+        save_config(self.config_data)
+        self._restart_hotkey_listener()
 
-        self.cfg["start_stop_key"] = key_str
-        self.trigger_key_btn.config(text=key_str, bg=BG_INPUT, fg=COLOR_HOVER)
-        self.status_lbl.config(text="IDLE", fg=COLOR_TEXT_MUTED)
-        self.capturing_key = False
-        save_config(self.cfg)
-        self._restart_listener()
-
-    def _set_add_key(self, key):
-        if self.running_presser:
-            self.add_key_btn.config(text="PRESS KEY TO ADD", bg=BG_INPUT, fg=COLOR_HOVER)
-            self.status_lbl.config(text="IDLE", fg=COLOR_TEXT_MUTED)
-            self.capturing_add_key = False
+    def _apply_add_key(self, key):
+        if self.is_presser_running:
+            self.add_key_btn.config(text="PRESS KEY TO ADD", bg=COLOR_BG_INPUT, fg=COLOR_HOVER)
+            self.status_label.config(text="IDLE", fg=COLOR_TEXT_MUTED)
+            self.is_capturing_add_key = False
             return
-        if hasattr(key, 'char') and key.char:
-            key_str = key.char.lower()
-        elif hasattr(key, 'vk') and key.vk is not None:
-            if 96 <= key.vk <= 105:
-                key_str = f"numpad_{key.vk - 96}"
-            elif key.vk == 106:
-                key_str = "numpad_multiply"
-            elif key.vk == 107:
-                key_str = "numpad_add"
-            elif key.vk == 108:
-                key_str = "numpad_separator"
-            elif key.vk == 109:
-                key_str = "numpad_subtract"
-            elif key.vk == 110:
-                key_str = "numpad_decimal"
-            elif key.vk == 111:
-                key_str = "numpad_divide"
-            else:
-                key_str = None
-        elif hasattr(key, 'name'):
-            key_str = key.name.lower()
-        else:
-            return
-
+        key_str = self._resolve_captured_key_lower(key)
         if key_str:
-            self._add_key_to_set(key_str)
-            self.add_key_btn.config(text="PRESS KEY TO ADD", bg=BG_INPUT, fg=COLOR_HOVER)
-            self.status_lbl.config(text="IDLE", fg=COLOR_TEXT_MUTED)
-            self.capturing_add_key = False
+            self._add_keys_from_string(key_str)
+            self.add_key_btn.config(text="PRESS KEY TO ADD", bg=COLOR_BG_INPUT, fg=COLOR_HOVER)
+            self.status_label.config(text="IDLE", fg=COLOR_TEXT_MUTED)
+            self.is_capturing_add_key = False
 
-    def _start_random_key_capture(self):
-        self.capturing_random_key = True
-        self.trigger_random_key_btn.config(text="PRESS KEY", bg=COLOR_ACCENT, fg=COLOR_TEXT)
-        self.status_lbl.config(text="PRESS A KEY", fg=COLOR_ACCENT)
+    def _begin_random_hotkey_capture(self):
+        self.is_capturing_random_hotkey = True
+        self.random_hotkey_display_btn.config(text="PRESS KEY", bg=COLOR_ACCENT, fg=COLOR_TEXT)
+        self.status_label.config(text="PRESS A KEY", fg=COLOR_ACCENT)
 
-    def _set_random_trigger_key(self, key):
-        if hasattr(key, 'vk') and key.vk is not None:
-            if 96 <= key.vk <= 105:
-                key_str = f"NUMPAD_{key.vk - 96}"
-            elif key.vk == 106:
-                key_str = "NUMPAD_MULTIPLY"
-            elif key.vk == 107:
-                key_str = "NUMPAD_ADD"
-            elif key.vk == 108:
-                key_str = "NUMPAD_SEPARATOR"
-            elif key.vk == 109:
-                key_str = "NUMPAD_SUBTRACT"
-            elif key.vk == 110:
-                key_str = "NUMPAD_DECIMAL"
-            elif key.vk == 111:
-                key_str = "NUMPAD_DIVIDE"
-            else:
-                key_str = None
-        elif hasattr(key, 'name'):
-            key_str = key.name.upper()
-        elif hasattr(key, 'char') and key.char:
-            key_str = key.char.upper()
-        else:
+    def _apply_random_hotkey(self, key):
+        key_str = self._resolve_captured_key_upper(key)
+        if key_str is None:
             return
+        self.config_data["random_start_stop_key"] = key_str
+        self.random_hotkey_display_btn.config(text=key_str, bg=COLOR_BG_INPUT, fg=COLOR_HOVER)
+        self.status_label.config(text="IDLE", fg=COLOR_TEXT_MUTED)
+        self.is_capturing_random_hotkey = False
+        save_config(self.config_data)
+        self._restart_hotkey_listener()
 
-        self.cfg["random_start_stop_key"] = key_str
-        self.trigger_random_key_btn.config(text=key_str, bg=BG_INPUT, fg=COLOR_HOVER)
-        self.status_lbl.config(text="IDLE", fg=COLOR_TEXT_MUTED)
-        self.capturing_random_key = False
-        save_config(self.cfg)
-        self._restart_listener()
+    # ── Key capture helpers ───────────────────────────────────────────────────
+
+    def _resolve_captured_key_upper(self, key) -> str | None:
+        """Resolve a captured pynput key to an uppercase display name."""
+        if hasattr(key, 'vk') and key.vk is not None:
+            return _vk_to_numpad_name(key.vk)
+        if hasattr(key, 'name'):
+            return key.name.upper()
+        if hasattr(key, 'char') and key.char:
+            return key.char.upper()
+        return None
+
+    def _resolve_captured_key_lower(self, key) -> str | None:
+        """Resolve a captured pynput key to a lowercase key string for storage."""
+        if hasattr(key, 'char') and key.char:
+            return key.char.lower()
+        if hasattr(key, 'vk') and key.vk is not None:
+            return _vk_to_numpad_name_lower(key.vk)
+        if hasattr(key, 'name'):
+            return key.name.lower()
+        return None
 
 
 if __name__ == "__main__":
