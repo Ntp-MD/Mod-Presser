@@ -25,7 +25,7 @@ py -m PyInstaller --onefile --noconsole --name "AutoKeyPresser" ^
   --hidden-import pynput.keyboard ^
   --hidden-import pynput._util.win32 ^
   --distpath output ^
-  auto_key_presser.py
+  app.py
 
 if not exist "output\AutoKeyPresser.exe" (
     echo.
