@@ -6,6 +6,8 @@ pip install pynput
 
 import json, time, threading, sys, os, re
 import random
+import ctypes
+from ctypes import wintypes
 import tkinter as tk
 from tkinter import messagebox
 from pynput import keyboard, mouse
@@ -14,9 +16,16 @@ from pynput.mouse import Button, Controller as MouseController
 
 # ── Config path ──────────────────────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
-    CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "config.json")
+    # When frozen (exe), use exe directory for external config
+    EXE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    CONFIG_FILE = os.path.join(EXE_DIR, "config.json")
+    # Bundled config path (embedded in exe)
+    BUNDLED_CONFIG_FILE = os.path.join(sys._MEIPASS, "config.json") if hasattr(sys, '_MEIPASS') else None
 else:
-    CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    # When running from source
+    SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+    CONFIG_FILE = os.path.join(SRC_DIR, "config.json")
+    BUNDLED_CONFIG_FILE = None
 
 # ── Theme colors ─────────────────────────────────────────────────────────────
 COLOR_BG_MAIN        = "#0A0A0A"
@@ -39,7 +48,6 @@ FONT_SMALL = ("Segoe UI", 9)
 CONTROL_HEIGHT = 1
 LAYOUT_GAP     = 6
 CARD_PADDING   = 10
-LABEL_WIDTH    = 8
 
 # ── Key maps ──────────────────────────────────────────────────────────────────
 SPECIAL_KEY_MAP = {
@@ -62,6 +70,7 @@ MOUSE_BUTTON_MAP = {
     "button_x1": Button.x1,
     "button_x2": Button.x2,
 }
+MOUSE_BUTTON_VALUES: frozenset = frozenset(MOUSE_BUTTON_MAP.values())
 
 NUMPAD_KEY_MAP = {
     "num": Key.num_lock,
@@ -98,8 +107,8 @@ DEFAULT_CONFIG = {
         {
             "id": 1,
             "name": "Key Set 1",
-            "keys": ["1", "2", "3", "4"],
-            "delay_ms": 100,
+            "keys": ["4", "5", "6", "7", "8", "9"],
+            "delay_ms": 1500,
             "repeat_interval_sec": 30,
             "use_every": True,
             "repeat": "Infinity Mode",
@@ -109,35 +118,13 @@ DEFAULT_CONFIG = {
         {
             "id": 2,
             "name": "Key Set 2",
-            "keys": ["q", "w", "e", "r"],
-            "delay_ms": 100,
+            "keys": ["space"],
+            "delay_ms": 50,
             "repeat_interval_sec": 30,
             "use_every": True,
             "repeat": "Infinity Mode",
             "enabled": True,
             "trigger_key": "numpad_divide"
-        },
-        {
-            "id": 3,
-            "name": "Key Set 3",
-            "keys": ["a", "s", "d", "f"],
-            "delay_ms": 100,
-            "repeat_interval_sec": 30,
-            "use_every": True,
-            "repeat": "Infinity Mode",
-            "enabled": True,
-            "trigger_key": "numpad_subtract"
-        },
-        {
-            "id": 4,
-            "name": "Key Set 4",
-            "keys": ["z", "x", "c", "v"],
-            "delay_ms": 100,
-            "repeat_interval_sec": 30,
-            "use_every": True,
-            "repeat": "Infinity Mode",
-            "enabled": True,
-            "trigger_key": "numpad_add"
         }
     ],
     "random_move": {
@@ -156,43 +143,56 @@ DEFAULT_CONFIG = {
 keyboard_controller = Controller()
 mouse_controller = MouseController()
 
+# ── Pre-cached ctypes API references (avoid repeated attribute lookups) ───────
+_IS_WIN32 = sys.platform == "win32"
+if _IS_WIN32:
+    _user32   = ctypes.windll.user32
+    _kernel32 = ctypes.windll.kernel32
+    _PQLIMITED = 0x1000
+else:
+    _user32 = _kernel32 = None
+    _PQLIMITED = 0
+
+# ── Cached MOUSE_BUTTON_MAP values set for fast membership test ───────────────
+_MOUSE_BUTTON_VALUES: set = set()
+
+# ── Window filter result cache ────────────────────────────────────────────────
+_wf_cache_time:   float = 0.0
+_wf_cache_result: bool  = True
+_WF_CACHE_TTL:    float = 0.15
+
 
 # ── Window utilities ─────────────────────────────────────────────────────────
 
 def get_active_window_title() -> str:
-    if sys.platform != "win32":
+    if not _IS_WIN32:
         return ""
     try:
-        import ctypes
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
-        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-        buff = ctypes.create_unicode_buffer(length + 1)
-        ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
+        hwnd   = _user32.GetForegroundWindow()
+        length = _user32.GetWindowTextLengthW(hwnd)
+        buff   = ctypes.create_unicode_buffer(length + 1)
+        _user32.GetWindowTextW(hwnd, buff, length + 1)
         return buff.value
     except Exception:
         return ""
 
 
 def get_active_window_process_name() -> str:
-    if sys.platform != "win32":
+    if not _IS_WIN32:
         return ""
     try:
-        import ctypes
-        from ctypes import wintypes
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
-        pid = wintypes.DWORD()
-        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        h_process = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        hwnd = _user32.GetForegroundWindow()
+        pid  = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        h_process = _kernel32.OpenProcess(_PQLIMITED, False, pid)
         if h_process:
             try:
                 buf_size = wintypes.DWORD(260)
                 buf = ctypes.create_unicode_buffer(buf_size.value)
-                if ctypes.windll.kernel32.QueryFullProcessImageNameW(h_process, 0, buf, ctypes.byref(buf_size)):
+                if _kernel32.QueryFullProcessImageNameW(h_process, 0, buf, ctypes.byref(buf_size)):
                     return os.path.basename(buf.value)
             finally:
-                ctypes.windll.kernel32.CloseHandle(h_process)
+                _kernel32.CloseHandle(h_process)
     except Exception:
         pass
     return ""
@@ -200,35 +200,32 @@ def get_active_window_process_name() -> str:
 
 def get_running_processes() -> list[str]:
     """Get list of unique process names from all visible windows."""
-    if sys.platform != "win32":
+    if not _IS_WIN32:
         return []
     try:
-        import ctypes
-        from ctypes import wintypes
+        processes: list[str] = []
+        proc_set:  set[str]  = set()
 
         def enum_windows_proc(hwnd, lParam):
-            if ctypes.windll.user32.IsWindowVisible(hwnd):
-                title_length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-                if title_length > 0:
-                    pid = wintypes.DWORD()
-                    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-                    h_process = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                    if h_process:
-                        try:
-                            buf_size = wintypes.DWORD(260)
-                            buf = ctypes.create_unicode_buffer(buf_size.value)
-                            if ctypes.windll.kernel32.QueryFullProcessImageNameW(h_process, 0, buf, ctypes.byref(buf_size)):
-                                process_name = os.path.basename(buf.value)
-                                if process_name and process_name not in processes:
-                                    processes.append(process_name)
-                        finally:
-                            ctypes.windll.kernel32.CloseHandle(h_process)
+            if _user32.IsWindowVisible(hwnd) and _user32.GetWindowTextLengthW(hwnd) > 0:
+                pid = wintypes.DWORD()
+                _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                h_process = _kernel32.OpenProcess(_PQLIMITED, False, pid)
+                if h_process:
+                    try:
+                        buf_size = wintypes.DWORD(260)
+                        buf = ctypes.create_unicode_buffer(buf_size.value)
+                        if _kernel32.QueryFullProcessImageNameW(h_process, 0, buf, ctypes.byref(buf_size)):
+                            name = os.path.basename(buf.value)
+                            if name and name not in proc_set:
+                                proc_set.add(name)
+                                processes.append(name)
+                    finally:
+                        _kernel32.CloseHandle(h_process)
             return 1
 
-        processes = []
         EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, ctypes.c_void_p)
-        ctypes.windll.user32.EnumWindows(EnumWindowsProc(enum_windows_proc), 0)
+        _user32.EnumWindows(EnumWindowsProc(enum_windows_proc), 0)
         return sorted(processes, key=str.lower)
     except Exception as e:
         print(f"Error getting running processes: {e}")
@@ -237,26 +234,26 @@ def get_running_processes() -> list[str]:
 
 def get_running_windows() -> list[str]:
     """Get list of unique window titles from all visible windows."""
-    if sys.platform != "win32":
+    if not _IS_WIN32:
         return []
     try:
-        import ctypes
-        from ctypes import wintypes
+        titles:    list[str] = []
+        title_set: set[str]  = set()
 
         def enum_windows_proc(hwnd, lParam):
-            if ctypes.windll.user32.IsWindowVisible(hwnd):
-                title_length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-                if title_length > 0:
-                    buf = ctypes.create_unicode_buffer(title_length + 1)
-                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, title_length + 1)
+            if _user32.IsWindowVisible(hwnd):
+                length = _user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    _user32.GetWindowTextW(hwnd, buf, length + 1)
                     title = buf.value.strip()
-                    if title and title not in titles:
+                    if title and title not in title_set:
+                        title_set.add(title)
                         titles.append(title)
             return 1
 
-        titles = []
         EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, ctypes.c_void_p)
-        ctypes.windll.user32.EnumWindows(EnumWindowsProc(enum_windows_proc), 0)
+        _user32.EnumWindows(EnumWindowsProc(enum_windows_proc), 0)
         return sorted(titles, key=str.lower)
     except Exception as e:
         print(f"Error getting running windows: {e}")
@@ -264,6 +261,7 @@ def get_running_windows() -> list[str]:
 
 
 def is_window_filter_matched(filter_cfg: dict) -> bool:
+    global _wf_cache_time, _wf_cache_result
     try:
         if not filter_cfg or not filter_cfg.get("enabled", False):
             return True
@@ -272,24 +270,31 @@ def is_window_filter_matched(filter_cfg: dict) -> bool:
         if not query:
             return True
 
+        now = time.monotonic()
+        if now - _wf_cache_time < _WF_CACHE_TTL:
+            return _wf_cache_result
+
         mode = filter_cfg.get("mode", "Window Title")
         if mode == "Window Title":
-            title = get_active_window_title().lower()
-            return query in title
+            result = query in get_active_window_title().lower()
         elif mode == "Process Name":
             proc = get_active_window_process_name().lower()
-            return query in proc or query + ".exe" in proc or proc in query
+            result = query in proc or query + ".exe" in proc or proc in query
+        else:
+            result = True
 
-        return True
+        _wf_cache_time   = now
+        _wf_cache_result = result
+        return result
     except Exception as e:
-        print(f"Error in window filter matching: {e}")
-        return True  # Fail-safe: allow automation to continue if filter fails
+        print(f"Error in active window matching: {e}")
+        return True
 
 
 # ── Key utilities ─────────────────────────────────────────────────────────────
 
 def resolve_key(key_name: str):
-    """Resolve a key name string to a pynput Key or character."""
+    """Resolve a key name string to a pynput Key or character. Handles VK codes for layout independence."""
     normalized = key_name.lower().strip()
     if normalized in SPECIAL_KEY_MAP:
         return SPECIAL_KEY_MAP[normalized]
@@ -297,6 +302,13 @@ def resolve_key(key_name: str):
         return NUMPAD_KEY_MAP[normalized]
     if normalized in MOUSE_BUTTON_MAP:
         return MOUSE_BUTTON_MAP[normalized]
+    # Handle VK codes (layout-independent)
+    if normalized.startswith("vk:"):
+        try:
+            vk = int(normalized[3:])
+            return KeyCode.from_vk(vk)
+        except (ValueError, AttributeError):
+            return None
     if len(key_name) == 1:
         return key_name
     try:
@@ -306,7 +318,7 @@ def resolve_key(key_name: str):
 
 
 def normalize_hotkey(key_value) -> str | None:
-    """Normalize a pynput key object or string to a consistent string form."""
+    """Normalize a pynput key object or string to a consistent string form using VK codes for layout independence."""
     if key_value is None:
         return None
 
@@ -316,12 +328,14 @@ def normalize_hotkey(key_value) -> str | None:
     if key_value == Button.x2:
         return "mouse_5"
 
+    # Use VK code for layout-independent key storage
     if hasattr(key_value, "vk") and key_value.vk is not None:
         if key_value.vk in NUMPAD_VK_TO_NAME:
             return NUMPAD_VK_TO_NAME[key_value.vk]
         return f"vk:{key_value.vk}"
     if hasattr(key_value, "name") and key_value.name:
         return key_value.name.lower()
+    # Fallback to char only if no VK available (shouldn't happen for regular keys)
     if hasattr(key_value, "char") and key_value.char:
         return f"char:{key_value.char.lower()}"
     text = str(key_value).strip().lower()
@@ -352,29 +366,35 @@ def _vk_to_numpad_name_lower(vk: int) -> str | None:
 # ── Config I/O ────────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
+    # Try external config first (user's modified config)
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Error loading config: {e}")
-            return dict(DEFAULT_CONFIG)
+            print(f"Error loading external config: {e}")
+    
+    # Try bundled config (embedded in exe)
+    if BUNDLED_CONFIG_FILE and os.path.exists(BUNDLED_CONFIG_FILE):
+        try:
+            with open(BUNDLED_CONFIG_FILE) as f:
+                config = json.load(f)
+                print(f"Loaded bundled config from: {BUNDLED_CONFIG_FILE}")
+                return config
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Error loading bundled config: {e}")
+    
+    # Fallback to default
+    print("Using default config")
     return dict(DEFAULT_CONFIG)
 
 
 def save_config(config: dict) -> None:
+    global _wf_cache_time
     try:
         with open(CONFIG_FILE, "w") as f:
             json.dump(config, f, indent=2)
-        
-        # If in dev mode, also save a copy to the output/ folder
-        if not getattr(sys, 'frozen', False):
-            dev_dir = os.path.dirname(os.path.abspath(__file__))
-            output_dir = os.path.join(dev_dir, "output")
-            os.makedirs(output_dir, exist_ok=True)
-            output_config_path = os.path.join(output_dir, "config.json")
-            with open(output_config_path, "w") as f_out:
-                json.dump(config, f_out, indent=2)
+        _wf_cache_time = 0.0
     except IOError as e:
         print(f"Error saving config: {e}")
 
@@ -413,6 +433,11 @@ class OverlayWindow(tk.Toplevel):
         self._drag_y = 0
         self.bind("<ButtonPress-1>",   self._on_drag_start)
         self.bind("<B1-Motion>",       self._on_drag_motion)
+
+        # Store widget references for lightweight updates
+        self._filter_status_label = None
+        self._filter_title_label = None
+        self._filter_dot_label = None
 
         self._build()
         self._position_overlay()
@@ -488,6 +513,19 @@ class OverlayWindow(tk.Toplevel):
 
         self._render_features()
 
+        # Bottom separator
+        tk.Frame(inner, bg=self.OVERLAY_BORDER, height=1).pack(fill="x", pady=(6, 0))
+
+        # Exit button at bottom
+        exit_btn = tk.Button(
+            inner, text="EXIT", font=("Segoe UI", 9, "bold"),
+            bg=self.OVERLAY_DANGER, fg=COLOR_TEXT, relief="flat", bd=0, cursor="hand2", padx=12, pady=4,
+            command=lambda: self.app._emergency_exit()
+        )
+        exit_btn.pack(fill="x", pady=(6, 0))
+        exit_btn.bind("<Enter>",    lambda e: exit_btn.config(bg="#FF5555"))
+        exit_btn.bind("<Leave>",    lambda e: exit_btn.config(bg=self.OVERLAY_DANGER))
+
     def _render_features(self):
         for w in self._feature_frame.winfo_children():
             w.destroy()
@@ -519,7 +557,7 @@ class OverlayWindow(tk.Toplevel):
             lambda: app._toggle_random()
         )
 
-        # Window Filter Match Status
+        # Active Window Match Status
         filter_cfg = app.config_data.get("window_filter", {})
         if filter_cfg.get("enabled", False):
             try:
@@ -531,7 +569,7 @@ class OverlayWindow(tk.Toplevel):
                     active_title = active_title.strip()
                 self._add_filter_row("Game Match", is_matched, active_title)
             except Exception as e:
-                print(f"Error updating window filter status in overlay: {e}")
+                print(f"Error updating active window status in overlay: {e}")
                 # Show error state in overlay
                 self._add_filter_row("Game Match", False, "Error")
 
@@ -623,10 +661,12 @@ class OverlayWindow(tk.Toplevel):
 
         # Status dot (green if matched, red/orange if not matched)
         dot_color = self.OVERLAY_ACCENT if is_matched else self.OVERLAY_DANGER
-        tk.Label(
+        dot_label = tk.Label(
             row, text="●", font=("Segoe UI", 8),
             bg=self.OVERLAY_BG, fg=dot_color
-        ).pack(side="left", padx=(0, 5))
+        )
+        dot_label.pack(side="left", padx=(0, 5))
+        self._filter_dot_label = dot_label
 
         # Left info block: name + active window title
         info = tk.Frame(row, bg=self.OVERLAY_BG)
@@ -641,22 +681,26 @@ class OverlayWindow(tk.Toplevel):
         # Active window title hint below name
         truncated_title = active_title[:24] + "..." if len(active_title) > 24 else active_title
         hint_text = f"Active: {truncated_title}"
-        tk.Label(
+        title_label = tk.Label(
             info, text=hint_text,
             font=("Segoe UI", 7), bg=self.OVERLAY_BG,
             fg=self.OVERLAY_ACCENT if is_matched else "#888888",
             anchor="w"
-        ).pack(anchor="w")
+        )
+        title_label.pack(anchor="w")
+        self._filter_title_label = title_label
 
         # Right side: match status text
         status_text = "MATCHED" if is_matched else "PAUSED"
         status_bg = self.OVERLAY_ACCENT if is_matched else "#333333"
         status_fg = self.OVERLAY_TEXT if is_matched else self.OVERLAY_MUTED
-        tk.Label(
+        status_label = tk.Label(
             row, text=status_text, font=("Segoe UI", 7, "bold"),
             bg=status_bg, fg=status_fg,
             padx=6, pady=3
-        ).pack(side="right", padx=(8, 0))
+        )
+        status_label.pack(side="right", padx=(8, 0))
+        self._filter_status_label = status_label
 
         # Thin separator under each row
         tk.Frame(self._feature_frame, bg=self.OVERLAY_BORDER, height=1).pack(fill="x", pady=(0, 1))
@@ -671,11 +715,48 @@ class OverlayWindow(tk.Toplevel):
     def _update_loop(self):
         try:
             if self.winfo_exists():
-                # Always render features to update real-time window filter match status
-                self._render_features()
+                # Only rebuild UI when running state changes
+                if self._should_update():
+                    self._render_features()
+                # Lightweight update for active window status only
+                filter_cfg = self.app.config_data.get("window_filter", {})
+                if filter_cfg.get("enabled", False):
+                    self._update_filter_row()
                 self.after(500, self._update_loop)
         except tk.TclError:
             pass
+
+    def _update_filter_row(self):
+        """Lightweight update of active window row without full rebuild."""
+        if not (self._filter_status_label and self._filter_title_label and self._filter_dot_label):
+            return
+
+        try:
+            filter_cfg = self.app.config_data.get("window_filter", {})
+            is_matched = is_window_filter_matched(filter_cfg)
+            active_title = get_active_window_title()
+            if not active_title:
+                active_title = "No active window"
+            else:
+                active_title = active_title.strip()
+
+            # Update status dot color
+            dot_color = self.OVERLAY_ACCENT if is_matched else self.OVERLAY_DANGER
+            self._filter_dot_label.config(fg=dot_color)
+
+            # Update title text and color
+            truncated_title = active_title[:24] + "..." if len(active_title) > 24 else active_title
+            hint_text = f"Active: {truncated_title}"
+            title_fg = self.OVERLAY_ACCENT if is_matched else "#888888"
+            self._filter_title_label.config(text=hint_text, fg=title_fg)
+
+            # Update status badge
+            status_text = "MATCHED" if is_matched else "PAUSED"
+            status_bg = self.OVERLAY_ACCENT if is_matched else "#333333"
+            status_fg = self.OVERLAY_TEXT if is_matched else self.OVERLAY_MUTED
+            self._filter_status_label.config(text=status_text, bg=status_bg, fg=status_fg)
+        except Exception as e:
+            print(f"Error updating filter row: {e}")
 
     def _should_update(self) -> bool:
         """Check if any running state changed since last update."""
@@ -701,6 +782,174 @@ class OverlayWindow(tk.Toplevel):
         return False
 
 
+# ── Position / Zone Utilities ──────────────────────────────────────────────────
+
+def normalize_position(item) -> dict:
+    if isinstance(item, dict):
+        try:
+            x1 = int(item.get("x1", 0))
+        except (ValueError, TypeError):
+            x1 = 0
+        try:
+            y1 = int(item.get("y1", 0))
+        except (ValueError, TypeError):
+            y1 = 0
+        try:
+            x2 = int(item.get("x2", x1))
+        except (ValueError, TypeError):
+            x2 = x1
+        try:
+            y2 = int(item.get("y2", y1))
+        except (ValueError, TypeError):
+            y2 = y1
+        try:
+            weight = float(item.get("weight", 1.0))
+        except (ValueError, TypeError):
+            weight = 1.0
+        
+        delay_val = item.get("delay_ms")
+        if delay_val is not None:
+            try:
+                delay_val = int(delay_val)
+            except (ValueError, TypeError):
+                delay_val = None
+
+        return {
+            "type": item.get("type", "point"),
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "delay_ms": delay_val,
+            "weight": weight,
+            "name": item.get("name") or ""
+        }
+    elif isinstance(item, (list, tuple)):
+        if len(item) == 2:
+            try:
+                x1 = int(item[0])
+                y1 = int(item[1])
+            except (ValueError, TypeError):
+                x1, y1 = 0, 0
+            return {
+                "type": "point",
+                "x1": x1,
+                "y1": y1,
+                "x2": x1,
+                "y2": y1,
+                "delay_ms": None,
+                "weight": 1.0,
+                "name": ""
+            }
+        elif len(item) >= 4:
+            try:
+                x1 = int(item[0])
+                y1 = int(item[1])
+                x2 = int(item[2])
+                y2 = int(item[3])
+            except (ValueError, TypeError):
+                x1, y1, x2, y2 = 0, 0, 0, 0
+            return {
+                "type": "zone",
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "delay_ms": None,
+                "weight": 1.0,
+                "name": ""
+            }
+    return {"type": "point", "x1": 0, "y1": 0, "x2": 0, "y2": 0, "delay_ms": None, "weight": 1.0, "name": ""}
+
+
+class EditPositionDialog(tk.Toplevel):
+    def __init__(self, parent, position, index, on_save):
+        super().__init__(parent)
+        self.parent = parent
+        self.position = dict(position) # shallow copy
+        self.index = index
+        self.on_save = on_save
+
+        self.title("Edit Location Properties")
+        self.configure(bg=COLOR_BG_MAIN)
+        self.transient(parent)
+        self.grab_set()
+
+        # Center dialog relative to parent
+        self.update_idletasks()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        w = 320
+        h = 280
+        x = px + (pw - w) // 2
+        y = py + (ph - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.resizable(False, False)
+
+        # Style layout
+        padding = 12
+        
+        # Name
+        tk.Label(self, text="Label / Name", font=FONT_MAIN, bg=COLOR_BG_MAIN, fg=COLOR_TEXT_MUTED).pack(anchor="w", padx=padding, pady=(padding, 2))
+        self.name_var = tk.StringVar(value=self.position.get("name") or f"{self.position.get('type', 'point').capitalize()} {index+1}")
+        name_entry = tk.Entry(self, textvariable=self.name_var, font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT, relief="flat", bd=0, insertbackground=COLOR_HOVER)
+        name_entry.pack(fill="x", padx=padding, ipady=4)
+
+        # Delay ms
+        tk.Label(self, text="Per-Position Delay (ms) [Leave empty/0 for global]", font=FONT_MAIN, bg=COLOR_BG_MAIN, fg=COLOR_TEXT_MUTED).pack(anchor="w", padx=padding, pady=(8, 2))
+        delay_val = self.position.get("delay_ms")
+        self.delay_var = tk.StringVar(value=str(delay_val) if delay_val else "")
+        delay_entry = tk.Entry(self, textvariable=self.delay_var, font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT, relief="flat", bd=0, insertbackground=COLOR_HOVER)
+        delay_entry.pack(fill="x", padx=padding, ipady=4)
+
+        # Weight
+        tk.Label(self, text="Selection Weight (for Random Mode)", font=FONT_MAIN, bg=COLOR_BG_MAIN, fg=COLOR_TEXT_MUTED).pack(anchor="w", padx=padding, pady=(8, 2))
+        weight_val = self.position.get("weight", 1.0)
+        self.weight_var = tk.StringVar(value=str(weight_val))
+        weight_entry = tk.Entry(self, textvariable=self.weight_var, font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT, relief="flat", bd=0, insertbackground=COLOR_HOVER)
+        weight_entry.pack(fill="x", padx=padding, ipady=4)
+
+        # Buttons
+        btn_frame = tk.Frame(self, bg=COLOR_BG_MAIN)
+        btn_frame.pack(fill="x", side="bottom", padx=padding, pady=padding)
+
+        save_btn = tk.Button(btn_frame, text="SAVE", font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_HOVER, relief="flat", bd=0, command=self._save, width=10, height=1, cursor="hand2")
+        save_btn.pack(side="right")
+        save_btn.bind("<Enter>", lambda e: save_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT))
+        save_btn.bind("<Leave>", lambda e: save_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_HOVER))
+
+        cancel_btn = tk.Button(btn_frame, text="CANCEL", font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED, relief="flat", bd=0, command=self.destroy, width=10, height=1, cursor="hand2")
+        cancel_btn.pack(side="left")
+        cancel_btn.bind("<Enter>", lambda e: cancel_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT))
+        cancel_btn.bind("<Leave>", lambda e: cancel_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED))
+
+    def _save(self):
+        self.position["name"] = self.name_var.get().strip()
+        
+        delay_str = self.delay_var.get().strip()
+        if delay_str:
+            try:
+                self.position["delay_ms"] = int(delay_str)
+            except ValueError:
+                self.position["delay_ms"] = None
+        else:
+            self.position["delay_ms"] = None
+
+        weight_str = self.weight_var.get().strip()
+        if weight_str:
+            try:
+                self.position["weight"] = float(weight_str)
+            except ValueError:
+                self.position["weight"] = 1.0
+        else:
+            self.position["weight"] = 1.0
+
+        self.on_save(self.index, self.position)
+        self.destroy()
+
+
 # ── Main App ──────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -709,7 +958,6 @@ class App(tk.Tk):
         self.title("Auto Key Presser")
         self.resizable(True, True)
         self.configure(bg=COLOR_BG_MAIN)
-        self.minsize(1000, 750)
 
         self.config_data = load_config()
         self.is_presser_running = False
@@ -734,15 +982,25 @@ class App(tk.Tk):
         self.key_set_columns = 1
         self.is_rebuilding = False
 
-        self._resize_after_id = None
+        self.record_type_var = tk.StringVar(value="Point")
+        self.bulk_record_var = tk.BooleanVar(value=False)
+        self.zone_first_corner = None
 
-        self.bind('<Configure>', self._on_window_resize)
+        self._resize_after_id = None
+        self._initial_geometry_set = False
+
+        # Set geometry BEFORE building UI to avoid layout shift
+        self._fit_window_to_content()
+        self._initial_geometry_set = True
+
         self._build_ui()
         self._start_hotkey_listener()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.update_idletasks()
-        self._fit_window_to_content()
+
+        # Bind Configure event AFTER initial geometry is set
+        self.bind('<Configure>', self._on_window_resize)
 
         # Create overlay after main window is ready
         self.after(200, self._create_overlay)
@@ -867,33 +1125,13 @@ class App(tk.Tk):
 
     def _fit_window_to_content(self):
         self.update_idletasks()
-        content_height  = self.winfo_reqheight()
-        screen_height   = self.winfo_screenheight()
-        screen_width    = self.winfo_screenwidth()
-
-        # Minimum width 1000px, maintain 4:3 aspect ratio
-        min_width = 1000
-        min_height = int(min_width * 3 / 4)
-
-        # Calculate window dimensions based on content, but respect aspect ratio
-        window_height = min(content_height + 20, int(screen_height * 0.9))
-        window_width = int(window_height * 4 / 3)
-
-        # Ensure minimum dimensions
-        if window_width < min_width:
-            window_width = min_width
-            window_height = min_height
-        if window_height < min_height:
-            window_height = min_height
-            window_width = int(window_height * 4 / 3)
-
-        # Ensure window fits on screen
-        if window_width > screen_width:
-            window_width = screen_width
-            window_height = int(window_width * 3 / 4)
-
-        position_key    = self.config_data.get("window_position", "top-left")
-        x, y = self._calculate_window_position(window_width, window_height, position_key)
+        # Fixed window size 1200x800
+        window_width = 1200
+        window_height = 800
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
         self.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
     def _calculate_window_position(self, width: int, height: int, position: str) -> tuple[int, int]:
@@ -940,7 +1178,24 @@ class App(tk.Tk):
         return tk.Label(parent, text=text, **kw)
 
     def _select_tab(self, tab_id: str):
-        pass
+        self.current_tab = tab_id
+        self._update_tab_visibility()
+        self._update_tab_buttons()
+
+    def _update_tab_visibility(self):
+        if self.current_tab == "key_sets":
+            self.key_set_frame.pack(fill="both", expand=True)
+            self.random_move_frame.pack_forget()
+        elif self.current_tab == "random_move":
+            self.key_set_frame.pack_forget()
+            self.random_move_frame.pack(fill="both", expand=True)
+
+    def _update_tab_buttons(self):
+        for tab_id, btn in self.tab_buttons.items():
+            if tab_id == self.current_tab:
+                btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
+            else:
+                btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
 
     # ── UI build ──────────────────────────────────────────────────────────────
 
@@ -970,49 +1225,54 @@ class App(tk.Tk):
         footer_buttons.pack(fill="x", pady=(LAYOUT_GAP, 0))
         footer_buttons.grid_columnconfigure(0, weight=1)
         footer_buttons.grid_columnconfigure(1, weight=1)
+        footer_buttons.grid_columnconfigure(2, weight=1)
+        footer_buttons.grid_columnconfigure(3, weight=1)
         self.footer_frame = footer_buttons
 
         self.save_btn = self._make_button(footer_buttons, "SAVE ALL SETTINGS", self._save_config)
         self._grid_widget(self.save_btn, row=0, column=0, sticky="ew", padx=(0, LAYOUT_GAP))
 
         self.clear_config_btn = self._make_button(footer_buttons, "CLEAR CONFIG", self._clear_config)
-        self._grid_widget(self.clear_config_btn, row=0, column=1, sticky="ew")
+        self._grid_widget(self.clear_config_btn, row=0, column=1, sticky="ew", padx=(0, LAYOUT_GAP))
 
-        # Body (middle scrollable container)
-        body = tk.Frame(self, bg=COLOR_BG_MAIN)
-        body.pack(side="top", fill="both", expand=True, padx=CARD_PADDING, pady=CARD_PADDING)
+        self.execute_btn = self._make_button(footer_buttons, "EXECUTE", self._execute_all_key_sets)
+        self._grid_widget(self.execute_btn, row=0, column=2, sticky="ew", padx=(0, LAYOUT_GAP))
 
-        # Create Canvas and Scrollbar
-        canvas = tk.Canvas(body, bg=COLOR_BG_MAIN, highlightthickness=0)
-        scrollbar = tk.Scrollbar(body, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
+        self.exit_btn = tk.Button(
+            footer_buttons, text="EXIT", font=("Segoe UI", 10, "bold"),
+            bg=COLOR_DANGER, fg=COLOR_TEXT, relief="flat", bd=0, cursor="hand2", padx=16, pady=8,
+            command=self._emergency_exit
+        )
+        self._grid_widget(self.exit_btn, row=0, column=3, sticky="ew")
+        self.exit_btn.bind("<Enter>", lambda e: self.exit_btn.config(bg="#cc2233", fg=COLOR_TEXT))
+        self.exit_btn.bind("<Leave>", lambda e: self.exit_btn.config(bg=COLOR_DANGER, fg=COLOR_TEXT))
 
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        # Body (middle container - no scrollbar)
+        self.main_layout = tk.Frame(self, bg=COLOR_BG_MAIN)
+        self.main_layout.pack(side="top", fill="both", expand=True, padx=CARD_PADDING, pady=CARD_PADDING)
 
-        self.main_layout = tk.Frame(canvas, bg=COLOR_BG_MAIN)
-        canvas_window = canvas.create_window((0, 0), window=self.main_layout, anchor="nw")
+        # Tab navigation
+        tab_nav = tk.Frame(self.main_layout, bg=COLOR_BG_MAIN)
+        tab_nav.pack(fill="x", pady=(0, LAYOUT_GAP * 2))
+        
+        self.tab_buttons = {}
+        for tab_id, tab_name in [("key_sets", "Key Sets"), ("random_move", "Random Move")]:
+            btn = tk.Button(
+                tab_nav, text=tab_name, font=FONT_MAIN,
+                bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED,
+                activebackground=COLOR_ACCENT, activeforeground=COLOR_TEXT,
+                relief="flat", padx=15, pady=5,
+                command=lambda t=tab_id: self._select_tab(t)
+            )
+            btn.pack(side="left", padx=(0, LAYOUT_GAP))
+            self.tab_buttons[tab_id] = btn
+        
+        # Active Window frame (always visible)
+        self.window_filter_frame = tk.Frame(self.main_layout, bg=COLOR_BG_MAIN)
+        self._build_window_filter_section()
+        self.window_filter_frame.pack(fill="x", pady=(0, LAYOUT_GAP * 2))
 
-        # Keep main_layout width matched with canvas width
-        def configure_canvas(event):
-            canvas.itemconfig(canvas_window, width=event.width)
-        canvas.bind("<Configure>", configure_canvas)
-
-        # Update scrollregion when content changes
-        def configure_layout(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        self.main_layout.bind("<Configure>", configure_layout)
-
-        # Global Mousewheel scroll binding
-        def _on_mousewheel(event):
-            try:
-                if canvas.winfo_exists():
-                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            except Exception:
-                pass
-        self.bind_all("<MouseWheel>", _on_mousewheel)
-
-        # Key sets frame (top-left or single column depending on layout mode)
+        # Key sets frame
         self.key_set_frame = tk.Frame(self.main_layout, bg=COLOR_BG_MAIN)
         self.key_set_widget_refs = {}
         self._build_key_set_section()
@@ -1021,14 +1281,13 @@ class App(tk.Tk):
         self.random_move_frame = tk.Frame(self.main_layout, bg=COLOR_BG_MAIN)
         self._build_random_move_section()
 
-        # Window Filter frame
-        self.window_filter_frame = tk.Frame(self.main_layout, bg=COLOR_BG_MAIN)
-        self._build_window_filter_section()
-
         # Apply default single-column layout first
-        self.key_set_frame.pack(fill="both", expand=True, pady=(0, LAYOUT_GAP * 2))
-        self.random_move_frame.pack(fill="x", pady=(0, LAYOUT_GAP * 2))
-        self.window_filter_frame.pack(fill="x")
+        self.key_set_frame.pack(fill="both", expand=True)
+        self.random_move_frame.pack(fill="both", expand=True)
+        self.random_move_frame.pack_forget()
+        
+        # Initialize tab state
+        self._update_tab_buttons()
 
         # Then apply responsive layout based on window width
         self.after_idle(lambda: self._apply_responsive_layout(self.winfo_width()))
@@ -1135,12 +1394,11 @@ class App(tk.Tk):
         # Trigger key
         trigger_section = tk.Frame(content_frame, bg=COLOR_BG_CARD)
         trigger_section.pack(fill="x", pady=(LAYOUT_GAP, 0))
-        tk.Frame(trigger_section, bg=COLOR_BORDER, height=1).pack(fill="x", pady=(0, LAYOUT_GAP))
 
         trigger_key_row = tk.Frame(trigger_section, bg=COLOR_BG_CARD)
         trigger_key_row.pack(fill="x")
         trigger_key_row.grid_columnconfigure(1, weight=1)
-        self._make_label(trigger_key_row, "Trigger", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self._make_label(trigger_key_row, "Trigger").grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
         trigger_hotkey_row = tk.Frame(trigger_key_row, bg=COLOR_BG_CARD)
         trigger_hotkey_row.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
         trigger_hotkey_row.grid_columnconfigure(0, weight=1)
@@ -1164,12 +1422,11 @@ class App(tk.Tk):
         # Key chips
         chips_section = tk.Frame(content_frame, bg=COLOR_BG_CARD)
         chips_section.pack(fill="x", pady=(LAYOUT_GAP, 0))
-        tk.Frame(chips_section, bg=COLOR_BORDER, height=1).pack(fill="x", pady=(0, LAYOUT_GAP))
 
         chips_row = tk.Frame(chips_section, bg=COLOR_BG_CARD)
         chips_row.pack(fill="x")
         chips_row.grid_columnconfigure(1, weight=1)
-        self._make_label(chips_row, "Keys", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self._make_label(chips_row, "Keys").grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
         chips_container = tk.Frame(chips_row, bg=COLOR_BG_INPUT)
         chips_container.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
         self._render_key_chips(chips_container, key_set.get("keys", []), key_set_id)
@@ -1178,13 +1435,11 @@ class App(tk.Tk):
         # Settings
         settings_frame = tk.Frame(content_frame, bg=COLOR_BG_CARD)
         settings_frame.pack(fill="x", pady=(LAYOUT_GAP, 0))
-        tk.Frame(settings_frame, bg=COLOR_BORDER, height=1).pack(fill="x", pady=(0, LAYOUT_GAP))
 
         # Delay
         delay_row = tk.Frame(settings_frame, bg=COLOR_BG_CARD)
         delay_row.pack(fill="x", pady=(0, 2))
-        delay_row.grid_columnconfigure(2, weight=1)
-        self._make_label(delay_row, "Delay", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self._make_label(delay_row, "Delay").pack(side="left", padx=(LAYOUT_GAP, 2), anchor="center")
         delay_var = tk.IntVar(value=key_set.get("delay_ms", 100))
         delay_spinbox = tk.Spinbox(
             delay_row, from_=1, to=60000, textvariable=delay_var,
@@ -1193,17 +1448,16 @@ class App(tk.Tk):
             buttonbackground=COLOR_BG_INPUT, width=6,
             command=lambda kid=key_set_id: self._on_delay_change(kid, delay_spinbox.get()),
         )
-        self._grid_widget(delay_spinbox, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        delay_spinbox.pack(side="left", padx=(LAYOUT_GAP, 0), anchor="center")
         delay_spinbox.bind("<KeyRelease>", lambda e, kid=key_set_id: self._on_delay_change(kid, delay_spinbox.get()))
         delay_spinbox.bind("<Return>", lambda e: self.focus_set())
-        self._make_label(delay_row, "ms").grid(row=0, column=2, sticky="w", padx=(LAYOUT_GAP, 0))
+        self._make_label(delay_row, "ms").pack(side="left", padx=(LAYOUT_GAP, 0), anchor="center")
         self.key_set_widget_refs[f'delay_spinbox_{key_set_id}'] = delay_spinbox
 
         # Repeat interval
         interval_row = tk.Frame(settings_frame, bg=COLOR_BG_CARD)
         interval_row.pack(fill="x", pady=(0, 2))
-        interval_row.grid_columnconfigure(3, weight=1)
-        self._make_label(interval_row, "Every", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self._make_label(interval_row, "Every").pack(side="left", padx=(LAYOUT_GAP, LAYOUT_GAP), anchor="center")
 
         use_every_var       = tk.BooleanVar(value=key_set.get("use_every", True))
         repeat_interval_var = tk.IntVar(value=key_set.get("repeat_interval_sec", 30))
@@ -1215,7 +1469,7 @@ class App(tk.Tk):
             activeforeground=COLOR_TEXT, selectcolor=COLOR_BG_INPUT,
             relief="flat", bd=0, font=FONT_SMALL,
         )
-        self._grid_widget(use_every_checkbox, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        use_every_checkbox.pack(side="left", padx=(LAYOUT_GAP, LAYOUT_GAP), anchor="center")
 
         interval_spinbox = tk.Spinbox(
             interval_row, from_=1, to=3600, textvariable=repeat_interval_var,
@@ -1225,11 +1479,11 @@ class App(tk.Tk):
             state="normal" if use_every_var.get() else "disabled",
             command=lambda kid=key_set_id: self._on_repeat_interval_change(kid, interval_spinbox.get()),
         )
-        self._grid_widget(interval_spinbox, row=0, column=2, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        interval_spinbox.pack(side="left", padx=(LAYOUT_GAP, LAYOUT_GAP), anchor="center")
         interval_spinbox.bind("<KeyRelease>", lambda e, kid=key_set_id: self._on_repeat_interval_change(kid, interval_spinbox.get()))
         interval_spinbox.bind("<Return>", lambda e: self.focus_set())
 
-        self._make_label(interval_row, "s").grid(row=0, column=3, sticky="w", padx=(LAYOUT_GAP, 0))
+        self._make_label(interval_row, "s").pack(side="left", padx=(LAYOUT_GAP, 0), anchor="center")
         self.key_set_widget_refs[f'use_every_checkbox_{key_set_id}'] = use_every_checkbox
         self.key_set_widget_refs[f'repeat_interval_var_{key_set_id}'] = repeat_interval_var
         self.key_set_widget_refs[f'repeat_interval_spinbox_{key_set_id}'] = interval_spinbox
@@ -1237,7 +1491,7 @@ class App(tk.Tk):
         # Repeat mode
         repeat_row = tk.Frame(settings_frame, bg=COLOR_BG_CARD)
         repeat_row.pack(fill="x", pady=(0, 2))
-        self._make_label(repeat_row, "Repeat", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self._make_label(repeat_row, "Repeat").pack(side="left", padx=(LAYOUT_GAP, LAYOUT_GAP), anchor="center")
 
         repeat_mode_var = tk.StringVar(value=key_set.get("repeat", "Infinity Mode"))
 
@@ -1249,7 +1503,7 @@ class App(tk.Tk):
             command=lambda kid=key_set_id: self._on_repeat_mode_change(
                 kid, "Once", repeat_mode_var, repeat_once_btn, repeat_infinity_btn),
         )
-        self._grid_widget(repeat_once_btn, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        repeat_once_btn.pack(side="left", padx=(LAYOUT_GAP, LAYOUT_GAP), anchor="center")
 
         repeat_infinity_btn = tk.Button(
             repeat_row, text="INFINITY", width=10,
@@ -1259,7 +1513,7 @@ class App(tk.Tk):
             command=lambda kid=key_set_id: self._on_repeat_mode_change(
                 kid, "Infinity Mode", repeat_mode_var, repeat_once_btn, repeat_infinity_btn),
         )
-        self._grid_widget(repeat_infinity_btn, row=0, column=2, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        repeat_infinity_btn.pack(side="left", padx=(LAYOUT_GAP, LAYOUT_GAP), anchor="center")
 
         # Hover bindings after both buttons exist
         repeat_once_btn.bind("<Enter>",    lambda e: repeat_once_btn.config(
@@ -1279,12 +1533,11 @@ class App(tk.Tk):
         # Add key
         add_key_section = tk.Frame(content_frame, bg=COLOR_BG_CARD)
         add_key_section.pack(fill="x", pady=(LAYOUT_GAP, 0))
-        tk.Frame(add_key_section, bg=COLOR_BORDER, height=1).pack(fill="x", pady=(0, LAYOUT_GAP))
 
         add_key_row = tk.Frame(add_key_section, bg=COLOR_BG_CARD)
         add_key_row.pack(fill="x")
         add_key_row.grid_columnconfigure(1, weight=1)
-        self._make_label(add_key_row, "Add", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self._make_label(add_key_row, "Add").grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
 
         add_key_btn_frame = tk.Frame(add_key_row, bg=COLOR_BG_CARD)
         add_key_btn_frame.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, LAYOUT_GAP))
@@ -1301,34 +1554,9 @@ class App(tk.Tk):
         add_key_btn.bind("<Leave>", lambda e: add_key_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_HOVER))
         self.key_set_widget_refs[f'add_key_btn_{key_set_id}'] = add_key_btn
 
-        # Mouse button quick-add buttons
-        mouse_btn_frame = tk.Frame(add_key_btn_frame, bg=COLOR_BG_CARD)
-        mouse_btn_frame.grid(row=0, column=1, padx=(LAYOUT_GAP, 0))
-
-        m4_btn = tk.Button(
-            mouse_btn_frame, text="M4", font=FONT_SMALL,
-            bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED, relief="flat", bd=0, cursor="hand2",
-            width=3,
-            command=lambda kid=key_set_id: self._add_mouse_button_to_set(kid, "mouse_4")
-        )
-        m4_btn.pack(side="left", padx=1)
-        m4_btn.bind("<Enter>", lambda e: m4_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT))
-        m4_btn.bind("<Leave>", lambda e: m4_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED))
-
-        m5_btn = tk.Button(
-            mouse_btn_frame, text="M5", font=FONT_SMALL,
-            bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED, relief="flat", bd=0, cursor="hand2",
-            width=3,
-            command=lambda kid=key_set_id: self._add_mouse_button_to_set(kid, "mouse_5")
-        )
-        m5_btn.pack(side="left", padx=1)
-        m5_btn.bind("<Enter>", lambda e: m5_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT))
-        m5_btn.bind("<Leave>", lambda e: m5_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED))
-
         # Start/stop
         action_section = tk.Frame(content_frame, bg=COLOR_BG_CARD)
         action_section.pack(fill="x", pady=(LAYOUT_GAP, CARD_PADDING))
-        tk.Frame(action_section, bg=COLOR_BORDER, height=1).pack(fill="x", pady=(0, LAYOUT_GAP))
 
         action_row = tk.Frame(action_section, bg=COLOR_BG_CARD)
         action_row.pack(fill="x")
@@ -1374,65 +1602,79 @@ class App(tk.Tk):
         settings = tk.Frame(card, bg=COLOR_BG_CARD)
         settings.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
 
-        # Trigger key row
-        trigger_row = tk.Frame(settings, bg=COLOR_BG_CARD)
-        trigger_row.pack(fill="x", pady=(0, 2))
-        trigger_row.grid_columnconfigure(1, weight=1)
-        self._make_label(trigger_row, "Trigger", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
-        trigger_hotkey_row = tk.Frame(trigger_row, bg=COLOR_BG_CARD)
-        trigger_hotkey_row.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
-        trigger_hotkey_row.grid_columnconfigure(0, weight=1)
+        # Single compact row for all controls
+        compact_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        compact_row.pack(fill="x", pady=(0, LAYOUT_GAP))
+        compact_row.grid_columnconfigure(0, weight=0)
+        compact_row.grid_columnconfigure(1, weight=0)
+        compact_row.grid_columnconfigure(2, weight=0)
+        compact_row.grid_columnconfigure(3, weight=0)
+        compact_row.grid_columnconfigure(4, weight=0)
+        compact_row.grid_columnconfigure(5, weight=1)
 
+        # Trigger
+        self._make_label(compact_row, "Trigger", 6).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP//2))
         trigger_key = random_cfg.get("trigger_key", "numpad_multiply")
         self.random_trigger_hotkey_display_btn = tk.Button(
-            trigger_hotkey_row,
+            compact_row,
             text=trigger_key.upper(),
             bg=COLOR_BG_INPUT, fg=COLOR_HOVER, font=FONT_MAIN,
             relief="flat", bd=0, cursor="arrow",
             state="disabled", disabledforeground=COLOR_HOVER,
+            padx=15, pady=5,
         )
-        self._grid_widget(self.random_trigger_hotkey_display_btn, row=0, column=0, sticky="ew")
+        self.random_trigger_hotkey_display_btn.grid(row=0, column=1, padx=(0, LAYOUT_GAP//2))
         random_trigger_hotkey_change_btn = self._make_button(
-            trigger_hotkey_row, "CHANGE", self._begin_random_trigger_key_capture
+            compact_row, "Change Key", self._begin_random_trigger_key_capture
         )
-        self._grid_widget(random_trigger_hotkey_change_btn, row=0, column=1, padx=(LAYOUT_GAP, 0), sticky="e")
+        random_trigger_hotkey_change_btn.grid(row=0, column=2, padx=(0, LAYOUT_GAP))
 
-        # Mode row
-        mode_row = tk.Frame(settings, bg=COLOR_BG_CARD)
-        mode_row.pack(fill="x", pady=(0, 2))
-        mode_row.grid_columnconfigure(1, weight=1)
-        self._make_label(mode_row, "Mode", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
-
-        mode_btn_frame = tk.Frame(mode_row, bg=COLOR_BG_CARD)
-        mode_btn_frame.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
-
+        # Mode
         current_mode = random_cfg.get("mode", "Order")
-
         self.order_mode_btn = tk.Button(
-            mode_btn_frame, text="ORDER", width=10,
+            compact_row, text="Order",
             bg=COLOR_ACCENT if current_mode == "Order" else COLOR_BG_INPUT,
             fg=COLOR_TEXT if current_mode == "Order" else COLOR_TEXT_MUTED,
             font=FONT_MAIN, relief="flat", bd=0, cursor="hand2",
+            padx=15, pady=5,
             command=lambda: self._on_random_mode_change("Order")
         )
-        self.order_mode_btn.pack(side="left", padx=(0, LAYOUT_GAP))
+        self.order_mode_btn.grid(row=0, column=3, padx=(0, LAYOUT_GAP//2))
 
         self.random_mode_btn = tk.Button(
-            mode_btn_frame, text="RANDOM", width=10,
+            compact_row, text="Random",
             bg=COLOR_ACCENT if current_mode == "Random" else COLOR_BG_INPUT,
             fg=COLOR_TEXT if current_mode == "Random" else COLOR_TEXT_MUTED,
             font=FONT_MAIN, relief="flat", bd=0, cursor="hand2",
+            padx=15, pady=5,
             command=lambda: self._on_random_mode_change("Random")
         )
-        self.random_mode_btn.pack(side="left")
+        self.random_mode_btn.grid(row=0, column=4, padx=(0, LAYOUT_GAP))
 
-        # Positions row
-        pos_row = tk.Frame(settings, bg=COLOR_BG_CARD)
-        pos_row.pack(fill="x", pady=(0, 2))
-        pos_row.grid_columnconfigure(1, weight=1)
-        self._make_label(pos_row, "Positions", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        # Delay
+        self._make_label(compact_row, "Delay", 5).grid(row=0, column=5, sticky="w", padx=(LAYOUT_GAP, 2))
+        random_delay_var = tk.IntVar(value=random_cfg.get("delay_ms", 1000))
+        random_delay_spinbox = tk.Spinbox(
+            compact_row, from_=1, to=60000, textvariable=random_delay_var,
+            font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
+            buttonbackground=COLOR_BG_INPUT, width=5,
+            command=lambda: self._on_random_delay_change(random_delay_spinbox.get()),
+        )
+        random_delay_spinbox.grid(row=0, column=6, padx=(0, LAYOUT_GAP//2))
+        random_delay_spinbox.bind("<KeyRelease>", lambda e: self._on_random_delay_change(random_delay_spinbox.get()))
+        random_delay_spinbox.bind("<Return>", lambda e: self.focus_set())
+        self._make_label(compact_row, "ms", 2).grid(row=0, column=7, sticky="w")
+        self.random_delay_spinbox = random_delay_spinbox
 
-        pos_info_frame = tk.Frame(pos_row, bg=COLOR_BG_CARD)
+        # Second row: Positions and Record
+        second_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        second_row.pack(fill="x", pady=(0, LAYOUT_GAP))
+        second_row.grid_columnconfigure(1, weight=1)
+
+        # Positions section
+        self._make_label(second_row, "Positions").grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        pos_info_frame = tk.Frame(second_row, bg=COLOR_BG_CARD)
         pos_info_frame.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
 
         self.clear_positions_btn = self._make_button(
@@ -1442,9 +1684,9 @@ class App(tk.Tk):
 
         # Position chips container
         chips_row = tk.Frame(settings, bg=COLOR_BG_CARD)
-        chips_row.pack(fill="x", pady=(LAYOUT_GAP, 0))
+        chips_row.pack(fill="x", pady=(0, LAYOUT_GAP))
         chips_row.grid_columnconfigure(1, weight=1)
-        self._make_label(chips_row, "", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self._make_label(chips_row, "").grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
 
         positions_chips_container = tk.Frame(chips_row, bg=COLOR_BG_INPUT)
         positions_chips_container.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
@@ -1454,43 +1696,194 @@ class App(tk.Tk):
         positions = random_cfg.get("positions", [])
         self._render_position_chips(positions_chips_container, positions)
 
+        # Record Options Row
+        options_row = tk.Frame(settings, bg=COLOR_BG_CARD)
+        options_row.pack(fill="x", pady=(0, LAYOUT_GAP))
+        options_row.grid_columnconfigure(1, weight=1)
+
+        self._make_label(options_row, "Type").grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+
+        type_btn_frame = tk.Frame(options_row, bg=COLOR_BG_CARD)
+        type_btn_frame.grid(row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+
+        # Initial type from variable
+        curr_type = self.record_type_var.get()
+        self.point_type_btn = tk.Button(
+            type_btn_frame, text="POINT",
+            bg=COLOR_ACCENT if curr_type == "Point" else COLOR_BG_INPUT,
+            fg=COLOR_TEXT if curr_type == "Point" else COLOR_TEXT_MUTED,
+            font=FONT_SMALL, relief="flat", bd=0, cursor="hand2",
+            padx=10, pady=3,
+            command=lambda: self._set_record_type("Point")
+        )
+        self.point_type_btn.pack(side="left", padx=(0, LAYOUT_GAP))
+
+        self.zone_type_btn = tk.Button(
+            type_btn_frame, text="ZONE",
+            bg=COLOR_ACCENT if curr_type == "Zone" else COLOR_BG_INPUT,
+            fg=COLOR_TEXT if curr_type == "Zone" else COLOR_TEXT_MUTED,
+            font=FONT_SMALL, relief="flat", bd=0, cursor="hand2",
+            padx=10, pady=3,
+            command=lambda: self._set_record_type("Zone")
+        )
+        self.zone_type_btn.pack(side="left")
+
+        # Bulk mode checkbox
+        bulk_chk = tk.Checkbutton(
+            options_row, variable=self.bulk_record_var,
+            bg=COLOR_BG_CARD, fg=COLOR_SUCCESS, activebackground=COLOR_BG_CARD,
+            activeforeground=COLOR_SUCCESS, selectcolor=COLOR_BG_INPUT,
+            relief="flat", bd=0, font=FONT_SMALL
+        )
+        bulk_chk.grid(row=0, column=2, sticky="e")
+        tk.Label(options_row, text="Bulk Record Mode", font=FONT_SMALL,
+                 bg=COLOR_BG_CARD, fg=COLOR_TEXT).grid(row=0, column=3, sticky="e", padx=(2, LAYOUT_GAP))
+
         # Record row
         record_row = tk.Frame(settings, bg=COLOR_BG_CARD)
         record_row.pack(fill="x", pady=(0, 2))
         record_row.grid_columnconfigure(1, weight=1)
-        self._make_label(record_row, "Record", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
+        self._make_label(record_row, "Record").grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
 
         self.record_btn = self._make_button(
             record_row, "RECORD POSITIONS", self._toggle_recording
         )
         self.record_btn.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
 
-        # Delay row
-        delay_row = tk.Frame(settings, bg=COLOR_BG_CARD)
-        delay_row.pack(fill="x", pady=(0, 2))
-        delay_row.grid_columnconfigure(2, weight=1)
-        self._make_label(delay_row, "Delay", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
-        random_delay_var = tk.IntVar(value=random_cfg.get("delay_ms", 1000))
-        random_delay_spinbox = tk.Spinbox(
-            delay_row, from_=1, to=60000, textvariable=random_delay_var,
-            font=FONT_MAIN, bg=COLOR_BG_INPUT, fg=COLOR_TEXT,
-            insertbackground=COLOR_TEXT_MUTED, relief="flat", bd=0,
-            buttonbackground=COLOR_BG_INPUT, width=6,
-            command=lambda: self._on_random_delay_change(random_delay_spinbox.get()),
-        )
-        self._grid_widget(random_delay_spinbox, row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
-        random_delay_spinbox.bind("<KeyRelease>", lambda e: self._on_random_delay_change(random_delay_spinbox.get()))
-        random_delay_spinbox.bind("<Return>", lambda e: self.focus_set())
-        self._make_label(delay_row, "ms").grid(row=0, column=2, sticky="w", padx=(LAYOUT_GAP, 0))
-        self.random_delay_spinbox = random_delay_spinbox
+        # Help hint
+        self.record_help_lbl = tk.Label(card, text="Double-click a chip to edit properties. Draw path/zone on map.",
+                                        font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED)
+        self.record_help_lbl.pack(padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
 
-        tk.Label(card, text="Click RECORD, move mouse to see coordinates, and left-click to save 1 position.",
-                 font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED).pack(padx=CARD_PADDING, pady=(LAYOUT_GAP, 0))
+        # Visual Map Canvas
+        self.visual_map_canvas = tk.Canvas(card, height=180, bg=COLOR_BG_INPUT, highlightthickness=1, highlightbackground=COLOR_BORDER)
+        self.visual_map_canvas.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, LAYOUT_GAP))
+        self.visual_map_canvas.bind("<Configure>", lambda e: self._draw_visual_map())
 
         action_row = tk.Frame(card, bg=COLOR_BG_CARD)
-        action_row.pack(fill="x", padx=CARD_PADDING, pady=(LAYOUT_GAP, CARD_PADDING))
+        action_row.pack(fill="x", padx=CARD_PADDING, pady=(0, CARD_PADDING))
         self.toggle_random_btn = self._make_button(action_row, "START RANDOM MOVE", self._toggle_random)
         self.toggle_random_btn.pack(fill="x", ipady=4)
+
+    def _set_record_type(self, rtype: str):
+        self.record_type_var.set(rtype)
+        if rtype == "Point":
+            self.point_type_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
+            self.zone_type_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
+        else:
+            self.point_type_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
+            self.zone_type_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
+
+    def _draw_visual_map(self):
+        if not hasattr(self, 'visual_map_canvas') or not self.visual_map_canvas.winfo_exists():
+            return
+
+        canvas = self.visual_map_canvas
+        canvas.delete("all")
+
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw <= 1: cw = canvas.winfo_reqwidth()
+        if ch <= 1: ch = canvas.winfo_reqheight()
+        if cw <= 1: cw = 400
+        if ch <= 1: ch = 180
+
+        # Draw dark grid background
+        grid_color = "#1E1F1F"
+        for x in range(0, cw, 20):
+            canvas.create_line(x, 0, x, ch, fill=grid_color)
+        for y in range(0, ch, 20):
+            canvas.create_line(0, y, cw, y, fill=grid_color)
+
+        positions = self.config_data.get("random_move", {}).get("positions", [])
+        norm_positions = [normalize_position(p) for p in positions]
+
+        if not norm_positions:
+            canvas.create_text(cw/2, ch/2, text="VISUAL MAP: NO POSITIONS RECORDED YET",
+                               font=FONT_SMALL, fill=COLOR_TEXT_MUTED, justify="center")
+            return
+
+        # Find bounding box
+        xs = []
+        ys = []
+        for p in norm_positions:
+            xs.extend([p["x1"], p["x2"]])
+            ys.extend([p["y1"], p["y2"]])
+
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        dx = max_x - min_x
+        dy = max_y - min_y
+
+        if dx == 0: dx = 200; min_x -= 100; max_x += 100
+        if dy == 0: dy = 150; min_y -= 75; max_y += 75
+
+        margin = 25
+        scale_x = (cw - 2 * margin) / dx
+        scale_y = (ch - 2 * margin) / dy
+        scale = min(scale_x, scale_y)
+
+        # Center alignment
+        offset_x = margin + (cw - 2 * margin - dx * scale) / 2
+        offset_y = margin + (ch - 2 * margin - dy * scale) / 2
+
+        def transform(x, y):
+            tx = offset_x + (x - min_x) * scale
+            ty = offset_y + (y - min_y) * scale
+            return tx, ty
+
+        transformed_coords = []
+        for p in norm_positions:
+            tx1, ty1 = transform(p["x1"], p["y1"])
+            tx2, ty2 = transform(p["x2"], p["y2"])
+            transformed_coords.append((tx1, ty1, tx2, ty2, p))
+
+        # Draw execution paths in Order mode
+        mode = self.config_data.get("random_move", {}).get("mode", "Order")
+        if mode == "Order" and len(transformed_coords) > 1:
+            for i in range(len(transformed_coords)):
+                curr = transformed_coords[i]
+                nxt = transformed_coords[(i + 1) % len(transformed_coords)]
+                
+                cx1 = (curr[0] + curr[2]) / 2
+                cy1 = (curr[1] + curr[3]) / 2
+                cx2 = (nxt[0] + nxt[2]) / 2
+                cy2 = (nxt[1] + nxt[3]) / 2
+
+                canvas.create_line(cx1, cy1, cx2, cy2, fill="#3A3A3A", dash=(3, 3), width=1)
+
+        # Draw the points and zones
+        for idx, (tx1, ty1, tx2, ty2, p) in enumerate(transformed_coords):
+            label = p.get("name") or (f"Zone {idx+1}" if p["type"] == "zone" else f"Point {idx+1}")
+            custom_delay = p.get("delay_ms")
+            custom_weight = p.get("weight", 1.0)
+            
+            info_str = label
+            if custom_delay:
+                info_str += f" ({custom_delay}ms)"
+            if custom_weight != 1.0:
+                info_str += f" [w:{custom_weight}]"
+
+            if p["type"] == "zone":
+                rx1, rx2 = sorted([tx1, tx2])
+                ry1, ry2 = sorted([ty1, ty2])
+                canvas.create_rectangle(rx1, ry1, rx2, ry2, outline=COLOR_SUCCESS, fill="#0F2D15", width=1)
+                canvas.create_text((rx1+rx2)/2, ry1 - 8, text=info_str, font=FONT_SMALL, fill=COLOR_HOVER)
+            else:
+                r = 4
+                canvas.create_oval(tx1-r, ty1-r, tx1+r, ty1+r, fill=COLOR_SUCCESS, outline=COLOR_BG_MAIN, width=1)
+                canvas.create_text(tx1, ty1 - 10, text=info_str, font=FONT_SMALL, fill=COLOR_TEXT)
+
+    def _edit_position_properties(self, index: int, position_data: dict):
+        def on_save(idx, updated_pos):
+            positions = self.config_data.setdefault("random_move", {}).setdefault("positions", [])
+            if idx < len(positions):
+                positions[idx] = updated_pos
+                self.has_unsaved_changes = True
+                self._update_positions_display()
+
+        dialog = EditPositionDialog(self, position_data, index, on_save)
 
     def _build_window_filter_section(self):
         for w in self.window_filter_frame.winfo_children():
@@ -1532,7 +1925,7 @@ class App(tk.Tk):
             relief="flat", bd=0, font=FONT_SMALL,
         )
         self.window_filter_chk.pack(side="left")
-        tk.Label(enabled_frame, text="Run In Game Only", font=FONT_SMALL,
+        tk.Label(enabled_frame, text="Active Window Only", font=FONT_SMALL,
                  bg=COLOR_BG_CARD, fg=COLOR_TEXT).pack(side="left", padx=(2, 0))
 
         settings = tk.Frame(card, bg=COLOR_BG_CARD)
@@ -1542,12 +1935,13 @@ class App(tk.Tk):
         query_row = tk.Frame(settings, bg=COLOR_BG_CARD)
         query_row.pack(fill="x", pady=(0, 0))
         query_row.grid_columnconfigure(1, weight=1)
-        self.window_filter_label = self._make_label(query_row, "Window Title", LABEL_WIDTH)
+        self.window_filter_label = self._make_label(query_row, "Select Window")
         self.window_filter_label.grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
 
         query_input_frame = tk.Frame(query_row, bg=COLOR_BG_CARD)
         query_input_frame.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
         query_input_frame.grid_columnconfigure(0, weight=1)
+        query_input_frame.grid_columnconfigure(2, weight=1)
 
         query_var = tk.StringVar(value=filter_cfg.get("query", ""))
         self.window_filter_entry = tk.Entry(
@@ -1570,37 +1964,24 @@ class App(tk.Tk):
         )
         refresh_btn.grid(row=0, column=1, padx=(LAYOUT_GAP, 0))
 
-        # Match status indicator
-        status_row = tk.Frame(settings, bg=COLOR_BG_CARD)
-        status_row.pack(fill="x", pady=(LAYOUT_GAP, 0))
-        status_row.grid_columnconfigure(1, weight=1)
-        self._make_label(status_row, "Status", LABEL_WIDTH).grid(row=0, column=0, sticky="w", padx=(LAYOUT_GAP, LAYOUT_GAP))
-
-        self.window_filter_status_label = tk.Label(
-            status_row, text="Checking...", font=FONT_SMALL,
+        # Status label (same row as dropdown)
+        status_label = tk.Label(
+            query_input_frame, text="Status:", font=FONT_SMALL,
             bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED
         )
-        self.window_filter_status_label.grid(row=0, column=1, sticky="w", padx=(LAYOUT_GAP, 0))
+        status_label.grid(row=0, column=2, padx=(LAYOUT_GAP, 2), sticky="w")
+
+        # Match status indicator (same row as dropdown)
+        self.window_filter_status_label = tk.Label(
+            query_input_frame, text="Checking...", font=FONT_SMALL,
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED
+        )
+        self.window_filter_status_label.grid(row=0, column=3, sticky="w")
 
         tk.Label(card, text="Automation will only press keys or click when active window title matches this text.",
                  font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED).pack(padx=CARD_PADDING, pady=(0, 6))
 
         # Check Admin status to help user make "Run in game only" work for real
-        is_admin_mode = False
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                is_admin_mode = ctypes.windll.shell32.IsUserAnAdmin() != 0
-            except Exception:
-                pass
-
-        if not is_admin_mode:
-            tk.Label(card, text="⚠️ Note: Run this app as Administrator if keys do not register in-game.",
-                     font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_HOVER).pack(padx=CARD_PADDING, pady=(0, CARD_PADDING))
-        else:
-            tk.Label(card, text="✓ App is running as Administrator (Ready for elevated games)",
-                     font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_SUCCESS).pack(padx=CARD_PADDING, pady=(0, CARD_PADDING))
-
         # Start status update loop
         self._update_window_filter_status()
 
@@ -1628,13 +2009,13 @@ class App(tk.Tk):
         self._update_window_filter_status()
 
     def _update_window_filter_status(self):
-        """Update the window filter match status indicator."""
+        """Update the active window match status indicator."""
         if not hasattr(self, 'window_filter_status_label') or not self.window_filter_status_label.winfo_exists():
             return
 
         filter_cfg = self.config_data.get("window_filter", {})
         if not filter_cfg.get("enabled", False):
-            self.window_filter_status_label.config(text="Filter disabled", fg=COLOR_TEXT_MUTED)
+            self.window_filter_status_label.config(text="Active Window disabled", fg=COLOR_TEXT_MUTED)
             self.after(500, self._update_window_filter_status)
             return
 
@@ -1734,40 +2115,94 @@ class App(tk.Tk):
 
     def _start_recording_positions(self):
         self.is_recording_positions = True
-        self.record_btn.config(text="RECORDING... MOVE MOUSE", bg=COLOR_DANGER, fg=COLOR_TEXT)
+        self.zone_first_corner = None
+        rect_type = self.record_type_var.get()
+        self.record_btn.config(text=f"RECORDING {rect_type.upper()}... MOVE MOUSE", bg=COLOR_DANGER, fg=COLOR_TEXT)
         self.record_btn.bind("<Enter>", lambda e: None)
         self.record_btn.bind("<Leave>", lambda e: None)
-        self.status_label.config(text="RECORDING: MOVE MOUSE & LEFT CLICK TO SAVE ONE POSITION", fg=COLOR_SUCCESS)
+        self.status_label.config(text=f"RECORDING: CLICK TO SAVE {rect_type.upper()}(S)", fg=COLOR_SUCCESS)
+        # Hide window to avoid blocking mouse clicks
+        self.withdraw()
 
         self.last_move_update_time = 0
 
         def on_click(x, y, button, pressed):
             if button == mouse.Button.left and pressed:
-                try:
-                    win_x = self.winfo_rootx()
-                    win_y = self.winfo_rooty()
-                    win_w = self.winfo_width()
-                    win_h = self.winfo_height()
-                except tk.TclError:
-                    return
+                # Skip window boundary check when window is hidden (withdrawn)
+                if not self.winfo_ismapped():
+                    pass  # Window is hidden, accept all clicks
+                else:
+                    try:
+                        win_x = self.winfo_rootx()
+                        win_y = self.winfo_rooty()
+                        win_w = self.winfo_width()
+                        win_h = self.winfo_height()
+                        # Ignore click inside our main app window
+                        if win_x <= x <= win_x + win_w and win_y <= y <= win_y + win_h:
+                            return
+                    except tk.TclError:
+                        pass
 
-                # Ignore click inside our main app window
-                if win_x <= x <= win_x + win_w and win_y <= y <= win_y + win_h:
-                    return
-
+                rtype = self.record_type_var.get()
                 positions = self.config_data.setdefault("random_move", {}).setdefault("positions", [])
-                positions.append([x, y])
+
+                if rtype == "Zone":
+                    if self.zone_first_corner is None:
+                        # Recorded first corner
+                        self.zone_first_corner = (x, y)
+                        try:
+                            import winsound
+                            winsound.Beep(1200, 150)
+                        except Exception:
+                            pass
+                        self.after(0, lambda: self.record_btn.config(text=f"ZONE: CLICK CORNER 2 (FROM {x}, {y})"))
+                        return
+                    else:
+                        # Recorded second corner! Create zone
+                        x1, y1 = self.zone_first_corner
+                        self.zone_first_corner = None
+                        positions.append({
+                            "type": "zone",
+                            "x1": x1,
+                            "y1": y1,
+                            "x2": x,
+                            "y2": y,
+                            "delay_ms": None,
+                            "weight": 1.0,
+                            "name": f"Zone {len(positions)+1}"
+                        })
+                        try:
+                            import winsound
+                            winsound.Beep(800, 150)
+                        except Exception:
+                            pass
+                else:
+                    # Point mode
+                    positions.append({
+                        "type": "point",
+                        "x1": x,
+                        "y1": y,
+                        "x2": x,
+                        "y2": y,
+                        "delay_ms": None,
+                        "weight": 1.0,
+                        "name": f"Point {len(positions)+1}"
+                    })
+                    try:
+                        import winsound
+                        winsound.Beep(1000, 100)
+                    except Exception:
+                        pass
+
                 self.has_unsaved_changes = True
-
-                try:
-                    import winsound
-                    winsound.Beep(1000, 100)
-                except Exception:
-                    pass
-
                 self.after(0, self._update_positions_display)
-                # Auto-stop after recording 1 position (toggle 1-by-1)
-                self.after(0, self._stop_recording_positions)
+
+                if not self.bulk_record_var.get():
+                    self.after(0, self._stop_recording_positions)
+                else:
+                    # Reset zone state for next item in bulk mode
+                    self.zone_first_corner = None
+                    self.after(0, lambda: self.record_btn.config(text=f"BULK RECORDING... CLICK NEXT {rtype.upper()}"))
 
         def on_move(x, y):
             try:
@@ -1775,7 +2210,11 @@ class App(tk.Tk):
                     now = time.time()
                     if now - self.last_move_update_time >= 0.05: # Limit update to 20 FPS
                         self.last_move_update_time = now
-                        self.after(0, lambda: self.record_btn.config(text=f"CLICK TO RECORD ({x}, {y})"))
+                        rtype = self.record_type_var.get()
+                        if rtype == "Zone" and self.zone_first_corner is not None:
+                            self.after(0, lambda: self.record_btn.config(text=f"CORNER 2 AT ({x}, {y}) - CLICK TO FINISH ZONE"))
+                        else:
+                            self.after(0, lambda: self.record_btn.config(text=f"CLICK TO RECORD {rtype.upper()} ({x}, {y})"))
             except Exception:
                 pass
 
@@ -1785,17 +2224,29 @@ class App(tk.Tk):
 
     def _stop_recording_positions(self):
         self.is_recording_positions = False
-        if hasattr(self, 'mouse_listener') and self.mouse_listener:
-            try:
-                self.mouse_listener.stop()
-            except Exception:
-                pass
-            self.mouse_listener = None
+        self.zone_first_corner = None
+
+        listener = getattr(self, 'mouse_listener', None)
+        self.mouse_listener = None
+        if listener:
+            threading.Thread(target=listener.stop, daemon=True).start()
 
         self.record_btn.config(text="RECORD POSITIONS", bg=COLOR_BG_INPUT, fg=COLOR_HOVER)
         self.record_btn.bind("<Enter>", lambda e: self.record_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT))
         self.record_btn.bind("<Leave>", lambda e: self.record_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_HOVER))
         self.status_label.config(text="IDLE", fg=COLOR_TEXT_MUTED)
+        # Restore window after recording — use after() to ensure main loop handles it
+        self.after(50, self._restore_window_after_recording)
+
+    def _restore_window_after_recording(self):
+        try:
+            print("DEBUG: Restoring window...")
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            print("DEBUG: Window restored")
+        except tk.TclError as e:
+            print(f"DEBUG: Error restoring window: {e}")
 
     def _clear_recorded_positions(self):
         if self.is_random_running:
@@ -1811,6 +2262,7 @@ class App(tk.Tk):
         # Refresh position chips instead of old labels
         if hasattr(self, 'positions_chips_container') and self.positions_chips_container.winfo_exists():
             self._render_position_chips(self.positions_chips_container, positions)
+        self._draw_visual_map()
 
     def _on_random_mode_change(self, mode: str):
         self.config_data.setdefault("random_move", {})["mode"] = mode
@@ -1822,11 +2274,12 @@ class App(tk.Tk):
         else:
             self.order_mode_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
             self.random_mode_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
+        self._draw_visual_map()
 
     # ── Key chips ─────────────────────────────────────────────────────────────
 
     def _render_position_chips(self, chips_container, positions: list):
-        """Render position chips similar to key chips with delete buttons."""
+        """Render position chips similar to key chips with delete buttons and double-click edit."""
         try:
             for w in chips_container.winfo_children():
                 w.destroy()
@@ -1846,7 +2299,6 @@ class App(tk.Tk):
             if available_width <= 1:
                 available_width = chips_container.winfo_reqwidth()
             if available_width <= 1:
-                # Estimate based on layout columns
                 cols = getattr(self, 'key_set_columns', 1)
                 win_w = self.winfo_width()
                 if win_w <= 1:
@@ -1854,7 +2306,6 @@ class App(tk.Tk):
                 if win_w <= 1:
                     win_w = 800
                 card_w = (win_w - 40) if cols == 1 else ((win_w - 60) / 2)
-                # Chips container is in column 1, subtract label width and padding
                 available_width = max(300, card_w - 80)
         except tk.TclError:
             available_width = 400
@@ -1864,9 +2315,26 @@ class App(tk.Tk):
         used_width = 0
 
         try:
-            for idx, (x, y) in enumerate(positions):
-                coord_text = f"({x}, {y})"
-                estimated_width = max(60, len(coord_text) * 8 + 34)
+            for idx, p in enumerate(positions):
+                p_norm = normalize_position(p)
+                label_name = p_norm.get("name")
+                if not label_name:
+                    if p_norm["type"] == "zone":
+                        label_name = f"Zone {idx+1}"
+                    else:
+                        label_name = f"Point {idx+1}"
+
+                delay_suffix = f" {p_norm['delay_ms']}ms" if p_norm["delay_ms"] else ""
+                weight_suffix = f" w:{p_norm['weight']}" if p_norm["weight"] != 1.0 else ""
+                
+                if p_norm["type"] == "zone":
+                    coords_text = f"({p_norm['x1']},{p_norm['y1']})-({p_norm['x2']},{p_norm['y2']})"
+                else:
+                    coords_text = f"({p_norm['x1']},{p_norm['y1']})"
+                
+                chip_text = f"{label_name} {coords_text}{delay_suffix}{weight_suffix}"
+                estimated_width = max(70, len(chip_text) * 7 + 34)
+
                 if used_width and used_width + estimated_width > available_width:
                     current_row = tk.Frame(chips_container, bg=COLOR_BG_INPUT)
                     current_row.pack(fill="x", anchor="w", pady=(2, 0))
@@ -1874,8 +2342,12 @@ class App(tk.Tk):
 
                 chip = tk.Frame(current_row, bg=COLOR_BG_MAIN)
                 chip.pack(side="left", padx=1, pady=1)
-                tk.Label(chip, text=coord_text, font=FONT_MAIN, bg=COLOR_BG_MAIN,
-                         fg=COLOR_HOVER, padx=4, pady=1).pack(side="left")
+                
+                chip_label = tk.Label(chip, text=chip_text, font=FONT_MAIN, bg=COLOR_BG_MAIN,
+                                      fg=COLOR_HOVER, padx=4, pady=1, cursor="hand2")
+                chip_label.pack(side="left")
+                chip_label.bind("<Double-Button-1>", lambda e, i=idx, pn=p_norm: self._edit_position_properties(i, pn))
+
                 remove_label = tk.Label(chip, text="X", font=FONT_MAIN, bg=COLOR_BG_MAIN,
                                         fg=COLOR_TEXT_MUTED, cursor="hand2", padx=2)
                 remove_label.pack(side="left")
@@ -1895,6 +2367,7 @@ class App(tk.Tk):
             # Refresh position chips
             if hasattr(self, 'positions_chips_container') and self.positions_chips_container.winfo_exists():
                 self._render_position_chips(self.positions_chips_container, positions)
+            self._draw_visual_map()
 
     def _render_key_chips(self, chips_container, keys: list, key_set_id: int = 1):
         try:
@@ -1997,73 +2470,14 @@ class App(tk.Tk):
         if not hasattr(self, 'key_set_frame') or not hasattr(self, 'random_move_frame') or not hasattr(self, 'window_filter_frame'):
             return
 
-        new_layout_mode = "2col" if window_width >= 950 else "1col"
-        if new_layout_mode == "2col":
-            new_key_set_cols = 2 if window_width >= 1200 else 1
-        else:
-            new_key_set_cols = 2 if window_width >= 600 else 1
+        # Only adjust key set columns based on width (tabs handle the rest)
+        new_key_set_cols = 2 if window_width >= 900 else 1
 
-        layout_changed = (getattr(self, 'current_layout_mode', '') != new_layout_mode)
         cols_changed = (new_key_set_cols != self.key_set_columns)
 
-        if layout_changed or cols_changed:
+        if cols_changed:
             self.is_rebuilding = True
-            self.current_layout_mode = new_layout_mode
             self.key_set_columns = new_key_set_cols
-
-            # Unpack everything first (with existence checks)
-            try:
-                if hasattr(self, 'key_set_frame') and self.key_set_frame.winfo_exists():
-                    self.key_set_frame.pack_forget()
-                    self.key_set_frame.grid_forget()
-            except (tk.TclError, AttributeError):
-                pass
-
-            try:
-                if hasattr(self, 'random_move_frame') and self.random_move_frame.winfo_exists():
-                    self.random_move_frame.pack_forget()
-                    self.random_move_frame.grid_forget()
-            except (tk.TclError, AttributeError):
-                pass
-
-            try:
-                if hasattr(self, 'window_filter_frame') and self.window_filter_frame.winfo_exists():
-                    self.window_filter_frame.pack_forget()
-                    self.window_filter_frame.grid_forget()
-            except (tk.TclError, AttributeError):
-                pass
-
-            # Reset grid configure on main_layout
-            try:
-                self.main_layout.grid_columnconfigure(0, weight=1, uniform="")
-                self.main_layout.grid_columnconfigure(1, weight=0, uniform="")
-            except (tk.TclError, AttributeError):
-                pass
-
-            if new_layout_mode == "2col":
-                try:
-                    self.main_layout.grid_columnconfigure(0, weight=6, uniform="col")
-                    self.main_layout.grid_columnconfigure(1, weight=4, uniform="col")
-
-                    # Column 0: Key Sets (spanning 2 rows)
-                    self.key_set_frame.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, LAYOUT_GAP))
-
-                    # Column 1: Random Move (row 0)
-                    self.random_move_frame.grid(row=0, column=1, sticky="ew", padx=(LAYOUT_GAP, 0), pady=(0, LAYOUT_GAP * 2))
-
-                    # Column 1: Window Filter (row 1)
-                    self.window_filter_frame.grid(row=1, column=1, sticky="ew", padx=(LAYOUT_GAP, 0))
-                except (tk.TclError, AttributeError) as e:
-                    print(f"Error applying 2col layout: {e}")
-            else:
-                try:
-                    # Single column: Stacked
-                    self.key_set_frame.pack(fill="both", expand=True, pady=(0, LAYOUT_GAP * 2))
-                    self.random_move_frame.pack(fill="x", pady=(0, LAYOUT_GAP * 2))
-                    self.window_filter_frame.pack(fill="x")
-                except (tk.TclError, AttributeError) as e:
-                    print(f"Error applying 1col layout: {e}")
-
             self._build_key_set_section()
             self.is_rebuilding = False
         else:
@@ -2248,6 +2662,14 @@ class App(tk.Tk):
             self.has_unsaved_changes = False
             messagebox.showinfo("Cleared", "Configuration reset to default!", parent=self)
 
+    def _execute_all_key_sets(self):
+        self.config_data = self._collect_current_config()
+        key_sets = self.config_data.get("key_sets", [])
+        for key_set in key_sets:
+            key_set_id = key_set.get("id")
+            if key_set_id and key_set_id not in self.running_key_sets:
+                self._start_presser(key_set_id)
+
     def _toggle_presser(self, key_set_id: int):
         if key_set_id in self.running_key_sets:
             self._stop_presser(key_set_id)
@@ -2315,6 +2737,35 @@ class App(tk.Tk):
 
         self._enable_settings_controls_for_key_set(key_set_id)
 
+    def _emergency_exit(self):
+        """Immediately stops all active processes and closes the program."""
+        self._emergency_stop()
+        self.destroy()
+        sys.exit(0)
+
+    def _emergency_stop(self):
+        """Immediately stops all active key pressers and random mouse clickers as a panic abort."""
+        was_running = False
+        if self.is_random_running:
+            self._stop_random()
+            was_running = True
+
+        active_ids = list(self.running_key_sets)
+        if active_ids:
+            was_running = True
+            for kid in active_ids:
+                self._stop_presser(kid)
+
+        if was_running:
+            try:
+                import winsound
+                # Play high-to-low warning beeps to signify stop
+                winsound.Beep(800, 150)
+                winsound.Beep(500, 200)
+            except Exception:
+                pass
+            self.status_label.config(text="EMERGENCY ABORTED - ALL STOPPED", fg=COLOR_DANGER)
+
     def _toggle_random(self):
         if self.is_random_running:
             self._stop_random()
@@ -2373,19 +2824,22 @@ class App(tk.Tk):
                       repeat_mode: str = "Infinity Mode",
                       use_every: bool = True):
         resolved_keys = [k for k in (resolve_key(k) for k in keys) if k is not None]
+        running      = self.running_key_sets
+        config_data  = self.config_data
+
+        def _get_filter():
+            return config_data.get("window_filter", {})
 
         if repeat_mode == "Once":
             for key in resolved_keys:
-                if key_set_id not in self.running_key_sets:
+                if key_set_id not in running:
                     break
-                # Pause loop if target game/window is not active
-                while key_set_id in self.running_key_sets and not is_window_filter_matched(self.config_data.get("window_filter", {})):
+                while key_set_id in running and not is_window_filter_matched(_get_filter()):
                     time.sleep(0.2)
-                if key_set_id not in self.running_key_sets:
+                if key_set_id not in running:
                     break
                 try:
-                    # Check if key is a mouse button
-                    if key in MOUSE_BUTTON_MAP.values():
+                    if key in MOUSE_BUTTON_VALUES:
                         mouse_controller.press(key)
                         time.sleep(0.02)
                         mouse_controller.release(key)
@@ -2396,22 +2850,21 @@ class App(tk.Tk):
                 except Exception as e:
                     print(f"Error pressing key {key}: {e}")
                 time.sleep(delay_s)
-            # FIX: use discard instead of remove to avoid KeyError if already removed
-            self.running_key_sets.discard(key_set_id)
+            running.discard(key_set_id)
             self.after(0, lambda: self._stop_presser(key_set_id))
         else:
-            while key_set_id in self.running_key_sets:
+            while key_set_id in running:
+                filter_cfg = _get_filter()
                 for key in resolved_keys:
-                    if key_set_id not in self.running_key_sets:
+                    if key_set_id not in running:
                         break
-                    # Pause loop if target game/window is not active
-                    while key_set_id in self.running_key_sets and not is_window_filter_matched(self.config_data.get("window_filter", {})):
+                    while key_set_id in running and not is_window_filter_matched(filter_cfg):
                         time.sleep(0.2)
-                    if key_set_id not in self.running_key_sets:
+                        filter_cfg = _get_filter()
+                    if key_set_id not in running:
                         break
                     try:
-                        # Check if key is a mouse button
-                        if key in MOUSE_BUTTON_MAP.values():
+                        if key in MOUSE_BUTTON_VALUES:
                             mouse_controller.press(key)
                             time.sleep(0.02)
                             mouse_controller.release(key)
@@ -2422,37 +2875,59 @@ class App(tk.Tk):
                     except Exception as e:
                         print(f"Error pressing key {key}: {e}")
                     time.sleep(delay_s)
-                if key_set_id in self.running_key_sets and use_every:
-                    # Also respect window active filter during the interval sleep
+                if key_set_id in running and use_every:
                     interval_elapsed = 0.0
-                    while key_set_id in self.running_key_sets and interval_elapsed < repeat_interval_s:
-                        if is_window_filter_matched(self.config_data.get("window_filter", {})):
+                    while key_set_id in running and interval_elapsed < repeat_interval_s:
+                        if is_window_filter_matched(_get_filter()):
                             time.sleep(min(0.1, repeat_interval_s - interval_elapsed))
                             interval_elapsed += 0.1
                         else:
                             time.sleep(0.2)
 
     def _random_move_loop(self, delay_ms: int, positions: list, mode: str):
-        between_click_delay_s = max(delay_ms, 1) / 1000.0
-        num_positions = len(positions)
+        # Normalize and filter out any completely empty items
+        norm_positions = [normalize_position(p) for p in positions]
+        num_positions = len(norm_positions)
         if num_positions == 0:
             self.is_random_running = False
             self.after(0, self._stop_random)
             return
 
         index = 0
+        config_data = self.config_data
+        weights = [float(p.get("weight", 1.0)) for p in norm_positions]
+        if sum(weights) <= 0:
+            weights = [1.0] * num_positions
+
+        def _get_filter():
+            return config_data.get("window_filter", {})
+
         while self.is_random_running:
-            # Pause loop if target game/window is not active
-            while self.is_random_running and not is_window_filter_matched(self.config_data.get("window_filter", {})):
+            while self.is_random_running and not is_window_filter_matched(_get_filter()):
                 time.sleep(0.2)
             if not self.is_random_running:
                 break
 
             if mode == "Order":
-                x, y = positions[index]
+                pos = norm_positions[index]
                 index = (index + 1) % num_positions
-            else: # Random Mode
-                x, y = random.choice(positions)
+            else:
+                pos = random.choices(norm_positions, weights=weights, k=1)[0]
+
+            # Calculate click position (Point vs Zone)
+            if pos.get("type") == "zone":
+                x1, x2 = sorted([int(pos.get("x1", 0)), int(pos.get("x2", 0))])
+                y1, y2 = sorted([int(pos.get("y1", 0)), int(pos.get("y2", 0))])
+                # Draw random point inside zone
+                x = random.randint(x1, x2)
+                y = random.randint(y1, y2)
+            else:
+                x = int(pos.get("x1", 0))
+                y = int(pos.get("y1", 0))
+
+            # Retrieve custom delay if set
+            custom_delay = pos.get("delay_ms")
+            pos_delay_s = (float(custom_delay) / 1000.0) if (custom_delay is not None and int(custom_delay) > 0) else (float(delay_ms) / 1000.0)
 
             try:
                 mouse_controller.position = (x, y)
@@ -2464,7 +2939,7 @@ class App(tk.Tk):
                 print(f"Error clicking at ({x}, {y}): {e}")
 
             if self.is_random_running:
-                time.sleep(between_click_delay_s)
+                time.sleep(max(0.01, pos_delay_s))
 
         self.after(0, self._stop_random)
 
@@ -2473,16 +2948,26 @@ class App(tk.Tk):
     def _start_hotkey_listener(self):
         def on_key_press(key):
             try:
-                # ESC cancels any capture in progress
-                if key == Key.esc and any([
+                # 1. Emergency Panic Abort (when NOT capturing hotkeys)
+                is_capturing = any([
                     self.is_capturing_presser_hotkey,
                     self.is_capturing_random_hotkey,
                     self.is_capturing_add_key,
                     self.is_capturing_trigger_key,
                     self.is_capturing_random_trigger_key,
-                ]):
-                    self.after(0, self._cancel_all_captures)
+                ])
+                if not is_capturing and (key == Key.pause or key == Key.f12):
+                    self.after(0, self._emergency_stop)
                     return
+
+                # ESC cancels any capture or position recording in progress
+                if key == Key.esc:
+                    if getattr(self, 'is_recording_positions', False):
+                        self.after(0, self._stop_recording_positions)
+                        return
+                    if is_capturing:
+                        self.after(0, self._cancel_all_captures)
+                        return
 
                 if self.is_capturing_presser_hotkey:
                     self.after(0, lambda k=key: self._apply_presser_hotkey(k))
@@ -2691,6 +3176,8 @@ class App(tk.Tk):
 
     def _on_window_resize(self, event):
         if event.widget != self:
+            return
+        if not getattr(self, '_initial_geometry_set', False):
             return
         if self._resize_after_id:
             self.after_cancel(self._resize_after_id)
@@ -3109,8 +3596,13 @@ class App(tk.Tk):
             return "MOUSE_4"
         if key == Button.x2:
             return "MOUSE_5"
+        # Use VK code for layout-independent key storage
         if hasattr(key, 'vk') and key.vk is not None:
-            return _vk_to_numpad_name(key.vk)
+            numpad_name = _vk_to_numpad_name(key.vk)
+            if numpad_name:
+                return numpad_name
+            # For regular keys, store VK code for layout independence
+            return f"VK:{key.vk}"
         if hasattr(key, 'name'):
             return key.name.upper()
         if hasattr(key, 'char') and key.char:
@@ -3123,12 +3615,17 @@ class App(tk.Tk):
             return "mouse_4"
         if key == Button.x2:
             return "mouse_5"
-        if hasattr(key, 'char') and key.char:
-            return key.char.lower()
+        # Use VK code for layout-independent key storage
         if hasattr(key, 'vk') and key.vk is not None:
-            return _vk_to_numpad_name_lower(key.vk)
+            numpad_name = _vk_to_numpad_name_lower(key.vk)
+            if numpad_name:
+                return numpad_name
+            # For regular keys, store VK code for layout independence
+            return f"vk:{key.vk}"
         if hasattr(key, 'name'):
             return key.name.lower()
+        if hasattr(key, 'char') and key.char:
+            return key.char.lower()
         return None
 
 
