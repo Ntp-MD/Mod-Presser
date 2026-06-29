@@ -4,15 +4,25 @@ Auto Key Presser - Dark UI
 pip install pynput
 """
 
-import json, time, threading, sys, os, re
+import json, time, threading, sys, os, copy, logging, tempfile, traceback
 import random
 import ctypes
 from ctypes import wintypes
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, font as tkfont
 from pynput import keyboard, mouse
 from pynput.keyboard import Key, KeyCode, Controller
 from pynput.mouse import Button, Controller as MouseController
+
+# ── DPI awareness (Windows) ──────────────────────────────────────────────────
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 # ── Config path ──────────────────────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
@@ -43,6 +53,12 @@ COLOR_TEXT_MUTED     = "#888888"
 FONT_TITLE = ("Segoe UI", 16, "bold")
 FONT_MAIN  = ("Segoe UI", 10)
 FONT_SMALL = ("Segoe UI", 9)
+
+# ── Pre-measured font metrics for chip width calculation ────────────────────
+_root_tk = tk.Tk()
+_root_tk.withdraw()
+_chip_font = tkfont.Font(font=FONT_MAIN)
+_root_tk.destroy()
 
 # ── Layout constants ──────────────────────────────────────────────────────────
 CONTROL_HEIGHT = 1
@@ -153,9 +169,6 @@ else:
     _user32 = _kernel32 = None
     _PQLIMITED = 0
 
-# ── Cached MOUSE_BUTTON_MAP values set for fast membership test ───────────────
-_MOUSE_BUTTON_VALUES: set = set()
-
 # ── Window filter result cache ────────────────────────────────────────────────
 _wf_cache_time:   float = 0.0
 _wf_cache_result: bool  = True
@@ -228,7 +241,7 @@ def get_running_processes() -> list[str]:
         _user32.EnumWindows(EnumWindowsProc(enum_windows_proc), 0)
         return sorted(processes, key=str.lower)
     except Exception as e:
-        print(f"Error getting running processes: {e}")
+        logging.error(f"Error getting running processes: {e}")
         return []
 
 
@@ -256,7 +269,7 @@ def get_running_windows() -> list[str]:
         _user32.EnumWindows(EnumWindowsProc(enum_windows_proc), 0)
         return sorted(titles, key=str.lower)
     except Exception as e:
-        print(f"Error getting running windows: {e}")
+        logging.error(f"Error getting running windows: {e}")
         return []
 
 
@@ -287,7 +300,7 @@ def is_window_filter_matched(filter_cfg: dict) -> bool:
         _wf_cache_result = result
         return result
     except Exception as e:
-        print(f"Error in active window matching: {e}")
+        logging.error(f"Error in active window matching: {e}")
         return True
 
 
@@ -309,8 +322,8 @@ def resolve_key(key_name: str):
             return KeyCode.from_vk(vk)
         except (ValueError, AttributeError):
             return None
-    if len(key_name) == 1:
-        return key_name
+    if len(normalized) == 1:
+        return normalized
     try:
         return getattr(Key, normalized)
     except AttributeError:
@@ -365,38 +378,105 @@ def _vk_to_numpad_name_lower(vk: int) -> str | None:
 
 # ── Config I/O ────────────────────────────────────────────────────────────────
 
+def _validate_config(raw) -> dict:
+    """Validate and normalize a raw config dict, filling defaults for missing/invalid fields."""
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    if not isinstance(raw, dict):
+        return cfg
+    # Validate key_sets
+    raw_key_sets = raw.get("key_sets", [])
+    if isinstance(raw_key_sets, list):
+        validated = []
+        for ks in raw_key_sets:
+            if not isinstance(ks, dict):
+                continue
+            try:
+                v = {
+                    "id": int(ks.get("id", len(validated) + 1)),
+                    "name": str(ks.get("name", f"Key Set {len(validated)+1}")),
+                    "keys": [str(k) for k in ks.get("keys", []) if isinstance(k, (str, int))],
+                    "delay_ms": max(1, int(ks.get("delay_ms", 100))),
+                    "repeat_interval_sec": max(1, int(ks.get("repeat_interval_sec", 30))),
+                    "use_every": bool(ks.get("use_every", True)),
+                    "repeat": str(ks.get("repeat", "Infinity Mode")),
+                    "enabled": bool(ks.get("enabled", True)),
+                    "trigger_key": str(ks.get("trigger_key", "numpad_decimal")),
+                }
+                validated.append(v)
+            except (ValueError, TypeError):
+                continue
+        if validated:
+            cfg["key_sets"] = validated
+    # Validate random_move
+    raw_rm = raw.get("random_move", {})
+    if isinstance(raw_rm, dict):
+        try:
+            cfg["random_move"] = {
+                "delay_ms": max(1, int(raw_rm.get("delay_ms", 1000))),
+                "trigger_key": str(raw_rm.get("trigger_key", "numpad_multiply")),
+                "mode": str(raw_rm.get("mode", "Order")),
+                "positions": raw_rm.get("positions", []) if isinstance(raw_rm.get("positions"), list) else [],
+            }
+        except (ValueError, TypeError):
+            pass
+    # Validate window_filter
+    raw_wf = raw.get("window_filter", {})
+    if isinstance(raw_wf, dict):
+        try:
+            cfg["window_filter"] = {
+                "enabled": bool(raw_wf.get("enabled", False)),
+                "mode": str(raw_wf.get("mode", "Window Title")),
+                "query": str(raw_wf.get("query", "")),
+            }
+        except (ValueError, TypeError):
+            pass
+    # Preserve random_start_stop_key if present
+    if "random_start_stop_key" in raw:
+        cfg["random_start_stop_key"] = str(raw["random_start_stop_key"])
+    return cfg
+
+
 def load_config() -> dict:
     # Try external config first (user's modified config)
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
-                return json.load(f)
+                return _validate_config(json.load(f))
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Error loading external config: {e}")
+            logging.error(f"Error loading external config: {e}")
     
     # Try bundled config (embedded in exe)
     if BUNDLED_CONFIG_FILE and os.path.exists(BUNDLED_CONFIG_FILE):
         try:
             with open(BUNDLED_CONFIG_FILE) as f:
                 config = json.load(f)
-                print(f"Loaded bundled config from: {BUNDLED_CONFIG_FILE}")
-                return config
+                logging.info(f"Loaded bundled config from: {BUNDLED_CONFIG_FILE}")
+                return _validate_config(config)
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Error loading bundled config: {e}")
+            logging.error(f"Error loading bundled config: {e}")
     
     # Fallback to default
-    print("Using default config")
-    return dict(DEFAULT_CONFIG)
+    logging.info("Using default config")
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
-def save_config(config: dict) -> None:
+def save_config(config: dict) -> bool:
+    """Save config atomically. Returns True on success, False on failure."""
     global _wf_cache_time
     try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=2)
+        dir_name = os.path.dirname(CONFIG_FILE)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=dir_name, suffix=".tmp",
+            delete=False, encoding="utf-8"
+        ) as tmp:
+            json.dump(config, tmp, indent=2)
+            tmp_path = tmp.name
+        os.replace(tmp_path, CONFIG_FILE)
         _wf_cache_time = 0.0
-    except IOError as e:
-        print(f"Error saving config: {e}")
+        return True
+    except (IOError, OSError) as e:
+        logging.error(f"Error saving config: {e}")
+        return False
 
 
 # ── Overlay Window ────────────────────────────────────────────────────────────
@@ -569,7 +649,7 @@ class OverlayWindow(tk.Toplevel):
                     active_title = active_title.strip()
                 self._add_filter_row("Game Match", is_matched, active_title)
             except Exception as e:
-                print(f"Error updating active window status in overlay: {e}")
+                logging.error(f"Error updating active window status in overlay: {e}")
                 # Show error state in overlay
                 self._add_filter_row("Game Match", False, "Error")
 
@@ -715,14 +795,21 @@ class OverlayWindow(tk.Toplevel):
     def _update_loop(self):
         try:
             if self.winfo_exists():
+                app = self.app
+                filter_enabled = app.config_data.get("window_filter", {}).get("enabled", False)
+                anything_running = bool(app.running_key_sets) or app.is_random_running
+                
                 # Only rebuild UI when running state changes
                 if self._should_update():
                     self._render_features()
-                # Lightweight update for active window status only
-                filter_cfg = self.app.config_data.get("window_filter", {})
-                if filter_cfg.get("enabled", False):
+                
+                # Lightweight filter row update only when filter is enabled
+                if filter_enabled:
                     self._update_filter_row()
-                self.after(500, self._update_loop)
+                
+                # Adaptive polling: fast when active, slow when idle
+                interval = 500 if (anything_running or filter_enabled) else 2000
+                self.after(interval, self._update_loop)
         except tk.TclError:
             pass
 
@@ -756,7 +843,7 @@ class OverlayWindow(tk.Toplevel):
             status_fg = self.OVERLAY_TEXT if is_matched else self.OVERLAY_MUTED
             self._filter_status_label.config(text=status_text, bg=status_bg, fg=status_fg)
         except Exception as e:
-            print(f"Error updating filter row: {e}")
+            logging.error(f"Error updating filter row: {e}")
 
     def _should_update(self) -> bool:
         """Check if any running state changed since last update."""
@@ -964,10 +1051,11 @@ class App(tk.Tk):
         self.is_random_running  = False
         self.press_threads:     list[threading.Thread] = []
         self.random_thread:     threading.Thread | None = None
-        self.individual_threads = None
         self.hotkey_listener:   keyboard.Listener | None = None
         self.held_keys:         dict = {}
         self.running_key_sets:  set[int] = set()
+        self._stop_events:      dict[int, threading.Event] = {}
+        self._random_stop_event: threading.Event = threading.Event()
 
         self.is_capturing_presser_hotkey = False
         self.is_capturing_random_hotkey  = False
@@ -975,8 +1063,11 @@ class App(tk.Tk):
         self.is_capturing_trigger_key    = False
         self.is_capturing_random_trigger_key = False
         self.capturing_trigger_key_id    = None
-        self.capturing_key_set_id        = None   # FIX: always initialized
+        self.capturing_key_set_id        = None
         self.has_unsaved_changes = False
+        self.is_recording_positions = False
+        self.mouse_listener = None
+        self.last_move_update_time = 0.0
 
         self.current_tab = "key_sets"
         self.key_set_columns = 1
@@ -1009,20 +1100,7 @@ class App(tk.Tk):
         self.overlay = OverlayWindow(self)
         # Removed minimize/restore bindings since overlay is now always visible
 
-    def _on_window_minimize(self, event):
-        """Show overlay when main window is minimized."""
-        if hasattr(self, 'overlay') and self.overlay.winfo_exists():
-            self.overlay.deiconify()
-
-    def _on_window_restore(self, event):
-        """Hide overlay when main window is restored."""
-        if hasattr(self, 'overlay') and self.overlay.winfo_exists():
-            self.overlay.withdraw()
-
     # ── UI state helpers ──────────────────────────────────────────────────────
-
-    def _update_action_button_state(self):
-        pass
 
     def _disable_settings_controls(self):
         key_sets = self.config_data.get("key_sets", [])
@@ -1119,7 +1197,6 @@ class App(tk.Tk):
             refs[f'repeat_infinity_btn_{key_set_id}'].config(state="normal")
         if f'add_key_btn_{key_set_id}' in refs:
             refs[f'add_key_btn_{key_set_id}'].config(state="normal")
-        self._refresh_key_chips()
 
     # ── Window geometry ───────────────────────────────────────────────────────
 
@@ -1133,16 +1210,6 @@ class App(tk.Tk):
         x = (screen_width - window_width) // 2
         y = (screen_height - window_height) // 2
         self.geometry(f"{window_width}x{window_height}+{x}+{y}")
-
-    def _calculate_window_position(self, width: int, height: int, position: str) -> tuple[int, int]:
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        positions = {
-            "top-left":     (10, 10),
-            "top-right":    (sw - width - 10, 10),
-            "bottom-left":  (10, sh - height - 10),
-            "bottom-right": (sw - width - 10, sh - height - 10),
-        }
-        return positions.get(position, ((sw - width) // 2, (sh - height) // 2))
 
     # ── Widget factory helpers ────────────────────────────────────────────────
 
@@ -1203,8 +1270,6 @@ class App(tk.Tk):
         for widget in self.winfo_children():
             widget.destroy()
         self._build_full_ui()
-        self._update_action_button_state()
-        self._apply_responsive_layout(self.winfo_width())
 
     def _build_full_ui(self):
         # Header (pinned at top)
@@ -1330,8 +1395,6 @@ class App(tk.Tk):
         add_btn_row.grid(row=len(key_sets), column=0, columnspan=cols, sticky="ew", pady=(LAYOUT_GAP, 0))
         add_btn = self._make_button(add_btn_row, "+ ADD KEY SET", self._add_key_set)
         add_btn.pack(fill="x", ipady=4)
-
-        self.after_idle(self._refresh_key_chips)
 
     def _build_key_set_card(self, key_set: dict):
         key_set_id = key_set.get("id", 1)
@@ -1992,16 +2055,18 @@ class App(tk.Tk):
     def _on_window_filter_mode_change(self, mode: str):
         self.config_data.setdefault("window_filter", {})["mode"] = mode
         self.has_unsaved_changes = True
-        if mode == "Window Title":
-            self.window_filter_title_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
-            self.window_filter_process_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
-            if hasattr(self, 'window_filter_label') and self.window_filter_label.winfo_exists():
-                self.window_filter_label.config(text="Window Title")
-        else:
-            self.window_filter_title_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
-            self.window_filter_process_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
-            if hasattr(self, 'window_filter_label') and self.window_filter_label.winfo_exists():
-                self.window_filter_label.config(text="Process Name")
+        if hasattr(self, 'window_filter_title_btn') and self.window_filter_title_btn:
+            if mode == "Window Title":
+                self.window_filter_title_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
+            else:
+                self.window_filter_title_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
+        if hasattr(self, 'window_filter_process_btn') and self.window_filter_process_btn:
+            if mode == "Window Title":
+                self.window_filter_process_btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED)
+            else:
+                self.window_filter_process_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT)
+        if hasattr(self, 'window_filter_label') and self.window_filter_label.winfo_exists():
+            self.window_filter_label.config(text="Window Title" if mode == "Window Title" else "Process Name")
 
     def _on_window_filter_query_change(self, query: str):
         self.config_data.setdefault("window_filter", {})["query"] = query
@@ -2016,13 +2081,12 @@ class App(tk.Tk):
         filter_cfg = self.config_data.get("window_filter", {})
         if not filter_cfg.get("enabled", False):
             self.window_filter_status_label.config(text="Active Window disabled", fg=COLOR_TEXT_MUTED)
-            self.after(500, self._update_window_filter_status)
             return
 
         query = filter_cfg.get("query", "").strip()
         if not query:
             self.window_filter_status_label.config(text="No query set", fg=COLOR_TEXT_MUTED)
-            self.after(500, self._update_window_filter_status)
+            self.after(1000, self._update_window_filter_status)
             return
 
         mode = filter_cfg.get("mode", "Window Title")
@@ -2042,7 +2106,7 @@ class App(tk.Tk):
         except Exception as e:
             self.window_filter_status_label.config(text="Error checking", fg=COLOR_DANGER)
 
-        self.after(500, self._update_window_filter_status)
+        self.after(1000, self._update_window_filter_status)
 
     def _show_process_menu(self, query_var: tk.StringVar):
         """Show dropdown menu with running processes or window titles based on mode."""
@@ -2086,7 +2150,7 @@ class App(tk.Tk):
             y = self.window_filter_entry.winfo_rooty() + self.window_filter_entry.winfo_height()
             self.process_menu.post(x, y)
         except Exception as e:
-            print(f"Error showing menu: {e}")
+            logging.error(f"Error showing menu: {e}")
 
     def _select_process(self, item_name: str, query_var: tk.StringVar):
         """Handle process or window selection from dropdown."""
@@ -2240,13 +2304,11 @@ class App(tk.Tk):
 
     def _restore_window_after_recording(self):
         try:
-            print("DEBUG: Restoring window...")
             self.deiconify()
             self.lift()
             self.focus_force()
-            print("DEBUG: Window restored")
         except tk.TclError as e:
-            print(f"DEBUG: Error restoring window: {e}")
+            logging.error(f"Error restoring window: {e}")
 
     def _clear_recorded_positions(self):
         if self.is_random_running:
@@ -2294,7 +2356,6 @@ class App(tk.Tk):
             return
 
         try:
-            chips_container.update_idletasks()
             available_width = chips_container.winfo_width()
             if available_width <= 1:
                 available_width = chips_container.winfo_reqwidth()
@@ -2333,7 +2394,7 @@ class App(tk.Tk):
                     coords_text = f"({p_norm['x1']},{p_norm['y1']})"
                 
                 chip_text = f"{label_name} {coords_text}{delay_suffix}{weight_suffix}"
-                estimated_width = max(70, len(chip_text) * 7 + 34)
+                estimated_width = max(70, _chip_font.measure(chip_text) + 34)
 
                 if used_width and used_width + estimated_width > available_width:
                     current_row = tk.Frame(chips_container, bg=COLOR_BG_INPUT)
@@ -2356,7 +2417,7 @@ class App(tk.Tk):
                 remove_label.bind("<Leave>",    lambda e, w=remove_label: w.config(fg=COLOR_TEXT_MUTED))
                 used_width += estimated_width
         except (tk.TclError, AttributeError) as e:
-            print(f"Error rendering position chips: {e}")
+            logging.error(f"Error rendering position chips: {e}")
 
     def _remove_position_at_index(self, position_index: int):
         """Remove a position at the given index."""
@@ -2391,7 +2452,6 @@ class App(tk.Tk):
             return
 
         try:
-            chips_container.update_idletasks()
             available_width = chips_container.winfo_width()
             if available_width <= 1:
                 available_width = chips_container.winfo_reqwidth()
@@ -2404,11 +2464,9 @@ class App(tk.Tk):
                 if win_w <= 1:
                     win_w = 800
                 card_w = (win_w - 40) if cols == 1 else ((win_w - 60) / 2)
-                # Chips container is in column 1, subtract label width and padding
                 available_width = max(300, card_w - 80)
         except (tk.TclError, AttributeError):
             try:
-                # Fallback estimation
                 cols = getattr(self, 'key_set_columns', 1)
                 win_w = self.winfo_width()
                 card_w = (win_w - 40) if cols == 1 else ((win_w - 60) / 2)
@@ -2422,7 +2480,9 @@ class App(tk.Tk):
             used_width = 0
 
             for idx, key_name in enumerate(keys):
-                estimated_width = max(44, len(key_name) * 8 + 34)
+                # Use accurate font measurement instead of len*8 heuristic
+                text_width = _chip_font.measure(key_name)
+                estimated_width = max(44, text_width + 34)
                 if used_width and used_width + estimated_width > available_width:
                     current_row = tk.Frame(chips_container, bg=COLOR_BG_INPUT)
                     current_row.pack(fill="x", anchor="w", pady=(2, 0))
@@ -2440,7 +2500,7 @@ class App(tk.Tk):
                 remove_label.bind("<Leave>",    lambda e, w=remove_label: w.config(fg=COLOR_TEXT_MUTED))
                 used_width += estimated_width
         except (tk.TclError, AttributeError) as e:
-            print(f"Error rendering key chips: {e}")
+            logging.error(f"Error rendering key chips: {e}")
 
     def _refresh_key_chips(self):
         if not self.key_set_widget_refs or self.is_rebuilding:
@@ -2454,8 +2514,6 @@ class App(tk.Tk):
             try:
                 if not chips_container.winfo_exists():
                     continue
-                # Double-check container is still valid before rendering
-                chips_container.update_idletasks()
                 self._render_key_chips(chips_container, key_set.get('keys', []), key_set_id)
             except (tk.TclError, AttributeError):
                 continue
@@ -2486,7 +2544,7 @@ class App(tk.Tk):
                 self._refresh_key_chips()
                 self._update_positions_display()
             except Exception as e:
-                print(f"Error refreshing chips during resize: {e}")
+                logging.error(f"Error refreshing chips during resize: {e}")
 
     # ── Config mutation handlers ──────────────────────────────────────────────
 
@@ -2611,9 +2669,9 @@ class App(tk.Tk):
                     try:
                         self._render_key_chips(chips_container, key_set.get('keys', []), key_set_id)
                     except (tk.TclError, AttributeError) as e:
-                        print(f"Error refreshing key chips: {e}")
+                        logging.error(f"Error refreshing key chips: {e}")
         except Exception as e:
-            print(f"Error removing key at index: {e}")
+            logging.error(f"Error removing key at index: {e}")
 
     def _on_random_delay_change(self, value):
         if self.is_random_running:
@@ -2644,10 +2702,12 @@ class App(tk.Tk):
             messagebox.showwarning("Cannot Save", "Cannot save configuration while running.", parent=self)
             return
         self.config_data = self._collect_current_config()
-        save_config(self.config_data)
-        self._restart_hotkey_listener()
-        self.has_unsaved_changes = False
-        messagebox.showinfo("Saved", "Config saved!", parent=self)
+        if save_config(self.config_data):
+            self._restart_hotkey_listener()
+            self.has_unsaved_changes = False
+            messagebox.showinfo("Saved", "Config saved!", parent=self)
+        else:
+            messagebox.showerror("Save Failed", "Could not save configuration. The directory may be read-only.", parent=self)
 
     def _clear_config(self):
         if self.is_presser_running or self.is_random_running:
@@ -2656,7 +2716,7 @@ class App(tk.Tk):
         if messagebox.askyesno("Clear Config", "Are you sure you want to reset to default configuration?", parent=self):
             if os.path.exists(CONFIG_FILE):
                 os.remove(CONFIG_FILE)
-            self.config_data = dict(DEFAULT_CONFIG)
+            self.config_data = copy.deepcopy(DEFAULT_CONFIG)
             self._build_ui()
             self._start_hotkey_listener()
             self.has_unsaved_changes = False
@@ -2680,6 +2740,9 @@ class App(tk.Tk):
     def _start_presser(self, key_set_id: int):
         self.running_key_sets.add(key_set_id)
         self.is_presser_running = True
+
+        stop_event = threading.Event()
+        self._stop_events[key_set_id] = stop_event
 
         btn = self.key_set_widget_refs.get(f'toggle_presser_btn_{key_set_id}')
         if btn:
@@ -2706,7 +2769,7 @@ class App(tk.Tk):
         if keys:
             thread = threading.Thread(
                 target=self._presser_loop,
-                args=(key_set_id, keys, delay_s, repeat_interval_s, repeat_mode, use_every),
+                args=(key_set_id, keys, delay_s, repeat_interval_s, repeat_mode, use_every, stop_event),
                 daemon=True,
             )
             thread.start()
@@ -2714,14 +2777,15 @@ class App(tk.Tk):
 
     def _stop_presser(self, key_set_id: int):
         self.running_key_sets.discard(key_set_id)
+        stop_event = self._stop_events.pop(key_set_id, None)
+        if stop_event:
+            stop_event.set()
 
         if not self.running_key_sets:
             self.is_presser_running = False
-            self.individual_threads = None
             status_text  = "IDLE" if not self.is_random_running else "RUNNING - RANDOM MOVE ACTIVE"
             status_color = COLOR_TEXT_MUTED if not self.is_random_running else COLOR_SUCCESS
             self.status_label.config(text=status_text, fg=status_color)
-            # FIX: only clear threads that have actually finished
             self.press_threads = [t for t in self.press_threads if t.is_alive()]
         else:
             self.status_label.config(
@@ -2756,15 +2820,23 @@ class App(tk.Tk):
             for kid in active_ids:
                 self._stop_presser(kid)
 
+        self._release_all_keys()
+
         if was_running:
             try:
                 import winsound
-                # Play high-to-low warning beeps to signify stop
                 winsound.Beep(800, 150)
                 winsound.Beep(500, 200)
             except Exception:
                 pass
             self.status_label.config(text="EMERGENCY ABORTED - ALL STOPPED", fg=COLOR_DANGER)
+
+    def _release_all_keys(self):
+        """Best-effort release of any potentially held-down keys."""
+        try:
+            keyboard_controller.release(Key.space)
+        except Exception:
+            pass
 
     def _toggle_random(self):
         if self.is_random_running:
@@ -2783,6 +2855,7 @@ class App(tk.Tk):
 
     def _start_random(self):
         self.is_random_running = True
+        self._random_stop_event.clear()
         self.toggle_random_btn.config(text="STOP RANDOM MOVE", bg=COLOR_DANGER, fg=COLOR_TEXT,
                                        activebackground="#cc2233", activeforeground=COLOR_TEXT)
         self.toggle_random_btn.bind("<Enter>", lambda e: self.toggle_random_btn.config(bg="#cc2233", fg=COLOR_TEXT))
@@ -2805,6 +2878,7 @@ class App(tk.Tk):
 
     def _stop_random(self):
         self.is_random_running = False
+        self._random_stop_event.set()
         self.toggle_random_btn.config(text="START RANDOM MOVE", bg=COLOR_BG_INPUT, fg=COLOR_HOVER,
                                        activebackground=COLOR_ACCENT, activeforeground=COLOR_TEXT)
         self.toggle_random_btn.bind("<Enter>", lambda e: self.toggle_random_btn.config(bg=COLOR_ACCENT, fg=COLOR_TEXT))
@@ -2812,8 +2886,6 @@ class App(tk.Tk):
         status_text  = "IDLE" if not self.is_presser_running else "RUNNING - AUTO PRESSER ACTIVE"
         status_color = COLOR_TEXT_MUTED if not self.is_presser_running else COLOR_SUCCESS
         self.status_label.config(text=status_text, fg=status_color)
-        if self.random_thread and self.random_thread.is_alive():
-            self.random_thread.join(timeout=0.5)
         self.random_thread = None
         self._enable_settings_controls()
 
@@ -2822,70 +2894,83 @@ class App(tk.Tk):
     def _presser_loop(self, key_set_id: int, keys: list, delay_s: float,
                       repeat_interval_s: float = 1.0,
                       repeat_mode: str = "Infinity Mode",
-                      use_every: bool = True):
+                      use_every: bool = True,
+                      stop_event: threading.Event | None = None):
         resolved_keys = [k for k in (resolve_key(k) for k in keys) if k is not None]
-        running      = self.running_key_sets
         config_data  = self.config_data
 
         def _get_filter():
             return config_data.get("window_filter", {})
 
-        if repeat_mode == "Once":
-            for key in resolved_keys:
-                if key_set_id not in running:
-                    break
-                while key_set_id in running and not is_window_filter_matched(_get_filter()):
-                    time.sleep(0.2)
-                if key_set_id not in running:
-                    break
+        def _is_running():
+            return stop_event is None or not stop_event.is_set()
+
+        def _wait_interruptible(seconds: float):
+            """Sleep that checks stop_event every 0.1s for responsive shutdown."""
+            if stop_event:
+                stop_event.wait(timeout=seconds)
+            else:
+                time.sleep(seconds)
+
+        def _press_and_release(key):
+            """Press then release a key with try/finally to prevent stuck keys."""
+            try:
+                if key in MOUSE_BUTTON_VALUES:
+                    mouse_controller.press(key)
+                    time.sleep(0.02)
+                else:
+                    keyboard_controller.press(key)
+                    time.sleep(0.02)
+            except Exception as e:
+                logging.error(f"Error pressing key {key}: {e}")
+            finally:
                 try:
                     if key in MOUSE_BUTTON_VALUES:
-                        mouse_controller.press(key)
-                        time.sleep(0.02)
                         mouse_controller.release(key)
                     else:
-                        keyboard_controller.press(key)
-                        time.sleep(0.02)
                         keyboard_controller.release(key)
-                except Exception as e:
-                    print(f"Error pressing key {key}: {e}")
-                time.sleep(delay_s)
-            running.discard(key_set_id)
+                except Exception:
+                    pass
+
+        if repeat_mode == "Once":
+            for key in resolved_keys:
+                if not _is_running():
+                    break
+                while _is_running() and not is_window_filter_matched(_get_filter()):
+                    time.sleep(0.2)
+                if not _is_running():
+                    break
+                _press_and_release(key)
+                _wait_interruptible(delay_s)
+            self.running_key_sets.discard(key_set_id)
             self.after(0, lambda: self._stop_presser(key_set_id))
         else:
-            while key_set_id in running:
+            while _is_running():
                 filter_cfg = _get_filter()
                 for key in resolved_keys:
-                    if key_set_id not in running:
+                    if not _is_running():
                         break
-                    while key_set_id in running and not is_window_filter_matched(filter_cfg):
+                    while _is_running() and not is_window_filter_matched(filter_cfg):
                         time.sleep(0.2)
                         filter_cfg = _get_filter()
-                    if key_set_id not in running:
+                    if not _is_running():
                         break
-                    try:
-                        if key in MOUSE_BUTTON_VALUES:
-                            mouse_controller.press(key)
-                            time.sleep(0.02)
-                            mouse_controller.release(key)
-                        else:
-                            keyboard_controller.press(key)
-                            time.sleep(0.02)
-                            keyboard_controller.release(key)
-                    except Exception as e:
-                        print(f"Error pressing key {key}: {e}")
-                    time.sleep(delay_s)
-                if key_set_id in running and use_every:
+                    _press_and_release(key)
+                    _wait_interruptible(delay_s)
+                if _is_running() and use_every:
                     interval_elapsed = 0.0
-                    while key_set_id in running and interval_elapsed < repeat_interval_s:
+                    while _is_running() and interval_elapsed < repeat_interval_s:
                         if is_window_filter_matched(_get_filter()):
-                            time.sleep(min(0.1, repeat_interval_s - interval_elapsed))
+                            step = min(0.1, repeat_interval_s - interval_elapsed)
+                            if stop_event:
+                                stop_event.wait(timeout=step)
+                            else:
+                                time.sleep(step)
                             interval_elapsed += 0.1
                         else:
                             time.sleep(0.2)
 
     def _random_move_loop(self, delay_ms: int, positions: list, mode: str):
-        # Normalize and filter out any completely empty items
         norm_positions = [normalize_position(p) for p in positions]
         num_positions = len(norm_positions)
         if num_positions == 0:
@@ -2895,17 +2980,22 @@ class App(tk.Tk):
 
         index = 0
         config_data = self.config_data
-        weights = [float(p.get("weight", 1.0)) for p in norm_positions]
+        weights = [max(0.0, float(p.get("weight", 1.0))) for p in norm_positions]
         if sum(weights) <= 0:
             weights = [1.0] * num_positions
+
+        stop_event = self._random_stop_event
 
         def _get_filter():
             return config_data.get("window_filter", {})
 
-        while self.is_random_running:
-            while self.is_random_running and not is_window_filter_matched(_get_filter()):
+        def _is_running():
+            return not stop_event.is_set()
+
+        while _is_running():
+            while _is_running() and not is_window_filter_matched(_get_filter()):
                 time.sleep(0.2)
-            if not self.is_random_running:
+            if not _is_running():
                 break
 
             if mode == "Order":
@@ -2914,18 +3004,15 @@ class App(tk.Tk):
             else:
                 pos = random.choices(norm_positions, weights=weights, k=1)[0]
 
-            # Calculate click position (Point vs Zone)
             if pos.get("type") == "zone":
                 x1, x2 = sorted([int(pos.get("x1", 0)), int(pos.get("x2", 0))])
                 y1, y2 = sorted([int(pos.get("y1", 0)), int(pos.get("y2", 0))])
-                # Draw random point inside zone
                 x = random.randint(x1, x2)
                 y = random.randint(y1, y2)
             else:
                 x = int(pos.get("x1", 0))
                 y = int(pos.get("y1", 0))
 
-            # Retrieve custom delay if set
             custom_delay = pos.get("delay_ms")
             pos_delay_s = (float(custom_delay) / 1000.0) if (custom_delay is not None and int(custom_delay) > 0) else (float(delay_ms) / 1000.0)
 
@@ -2934,12 +3021,20 @@ class App(tk.Tk):
                 time.sleep(0.05)
                 mouse_controller.press(Button.left)
                 time.sleep(0.05)
-                mouse_controller.release(Button.left)
             except Exception as e:
-                print(f"Error clicking at ({x}, {y}): {e}")
+                logging.error(f"Error clicking at ({x}, {y}): {e}")
+            finally:
+                try:
+                    mouse_controller.release(Button.left)
+                except Exception:
+                    pass
 
-            if self.is_random_running:
-                time.sleep(max(0.01, pos_delay_s))
+            if _is_running():
+                remaining = max(0.01, pos_delay_s)
+                while remaining > 0 and _is_running():
+                    step = min(0.1, remaining)
+                    stop_event.wait(timeout=step)
+                    remaining -= step
 
         self.after(0, self._stop_random)
 
@@ -2986,7 +3081,9 @@ class App(tk.Tk):
                     return
 
                 now = time.time()
-                self.held_keys = {k: t for k, t in self.held_keys.items() if now - t < 1.5}
+                for k in list(self.held_keys.keys()):
+                    if now - self.held_keys[k] >= 1.5:
+                        del self.held_keys[k]
 
                 key_sets = self.config_data.get("key_sets", [])
                 matched_key_sets = []
@@ -3023,13 +3120,13 @@ class App(tk.Tk):
                         self.held_keys[key] = now
                         self.after(0, self._toggle_random)
             except Exception as e:
-                print(f"Error in hotkey listener: {e}")
+                logging.error(f"Error in hotkey listener: {e}")
 
         def on_key_release(key):
             try:
                 self.held_keys.pop(key, None)
             except Exception as e:
-                print(f"Error in key release: {e}")
+                logging.error(f"Error in key release: {e}")
 
         def on_mouse_click(x, y, button, pressed):
             try:
@@ -3049,7 +3146,9 @@ class App(tk.Tk):
                         return
 
                 now = time.time()
-                self.held_keys = {k: t for k, t in self.held_keys.items() if now - t < 1.5}
+                for k in list(self.held_keys.keys()):
+                    if now - self.held_keys[k] >= 1.5:
+                        del self.held_keys[k]
 
                 # Check key sets for mouse button triggers
                 key_sets = self.config_data.get("key_sets", [])
@@ -3078,13 +3177,13 @@ class App(tk.Tk):
                         self.held_keys[button] = now
                         self.after(0, self._toggle_random)
             except Exception as e:
-                print(f"Error in mouse click handler: {e}")
+                logging.error(f"Error in mouse click handler: {e}")
 
         def on_mouse_release(x, y, button):
             try:
                 self.held_keys.pop(button, None)
             except Exception as e:
-                print(f"Error in mouse release: {e}")
+                logging.error(f"Error in mouse release: {e}")
 
         try:
             self.hotkey_listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
@@ -3095,7 +3194,7 @@ class App(tk.Tk):
             self.mouse_hotkey_listener.daemon = True
             self.mouse_hotkey_listener.start()
         except Exception as e:
-            print(f"Error starting hotkey listener: {e}")
+            logging.error(f"Error starting hotkey listener: {e}")
 
     def _restart_hotkey_listener(self):
         if self.hotkey_listener:
@@ -3103,13 +3202,13 @@ class App(tk.Tk):
                 self.hotkey_listener.stop()
                 self.hotkey_listener.join(timeout=0.5)
             except Exception as e:
-                print(f"Error stopping hotkey listener: {e}")
+                logging.error(f"Error stopping hotkey listener: {e}")
         if hasattr(self, 'mouse_hotkey_listener') and self.mouse_hotkey_listener:
             try:
                 self.mouse_hotkey_listener.stop()
                 self.mouse_hotkey_listener.join(timeout=0.5)
             except Exception as e:
-                print(f"Error stopping mouse hotkey listener: {e}")
+                logging.error(f"Error stopping mouse hotkey listener: {e}")
         self._start_hotkey_listener()
 
     def _cancel_all_captures(self):
@@ -3181,12 +3280,19 @@ class App(tk.Tk):
             return
         if self._resize_after_id:
             self.after_cancel(self._resize_after_id)
-        self._resize_after_id = self.after(200, lambda: self._apply_responsive_layout(event.width))
+        self._resize_after_id = self.after(250, lambda: self._apply_responsive_layout(event.width))
 
     def _on_close(self):
+        if self.has_unsaved_changes:
+            if not messagebox.askyesno("Unsaved Changes",
+                "You have unsaved changes. Exit anyway?", parent=self):
+                return
         self.is_presser_running = False
         self.is_random_running  = False
-        self.individual_threads = None
+        self._random_stop_event.set()
+        for evt in self._stop_events.values():
+            evt.set()
+        self._release_all_keys()
         if self.hotkey_listener:
             try:
                 self.hotkey_listener.stop()
@@ -3629,6 +3735,43 @@ class App(tk.Tk):
         return None
 
 
+def _setup_error_handling():
+    """Route all unhandled exceptions to a log file + user dialog."""
+    if getattr(sys, 'frozen', False):
+        log_dir = EXE_DIR
+    else:
+        log_dir = SRC_DIR
+    log_path = os.path.join(log_dir, "error.log")
+    logging.basicConfig(
+        filename=log_path,
+        level=logging.ERROR,
+        format='%(asctime)s %(levelname)s %(message)s'
+    )
+
+    def global_excepthook(exc_type, exc_value, exc_tb):
+        tb_text = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logging.error(f"Unhandled exception:\n{tb_text}")
+        try:
+            messagebox.showerror("Unexpected Error",
+                f"An unexpected error occurred:\n\n{exc_value}\n\n"
+                f"Details logged to: {log_path}")
+        except Exception:
+            pass
+
+    sys.excepthook = global_excepthook
+
+    def tk_error_handler(exc, val, tb):
+        tb_text = ''.join(traceback.format_exception(exc, val, tb))
+        logging.error(f"Tkinter callback error:\n{tb_text}")
+        try:
+            messagebox.showerror("Unexpected Error", f"An error occurred:\n\n{val}")
+        except Exception:
+            pass
+
+    tk.Tk.report_callback_exception = tk_error_handler
+
+
 if __name__ == "__main__":
+    _setup_error_handling()
     app = App()
     app.mainloop()
